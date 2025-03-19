@@ -1,0 +1,1 @@
+_RJEM_MALLOC_CONF="thp:always,metadata_thp:always" MALLOC_CONF="thp:always,metadata_thp:always" cargo install --path .
