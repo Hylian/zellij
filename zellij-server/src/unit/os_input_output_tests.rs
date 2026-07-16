@@ -67,10 +67,40 @@ fn get_cwd() {
     let server = make_server();
 
     let pid = std::process::id();
+    let start = std::time::Instant::now();
+    let cwd = server.get_cwd(pid);
+    let elapsed = start.elapsed();
+
     assert!(
-        server.get_cwd(pid).is_some(),
+        cwd.is_some(),
         "Get current working directory from PID {}",
         pid
+    );
+    assert!(
+        elapsed.as_millis() < 50,
+        "get_cwd took too long: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn get_cwds() {
+    let server = make_server();
+
+    let pid = std::process::id();
+    let start = std::time::Instant::now();
+    let (cwds, _cmds) = server.get_cwds(vec![pid]);
+    let elapsed = start.elapsed();
+
+    assert!(
+        cwds.contains_key(&pid),
+        "get_cwds should contain current PID {}",
+        pid
+    );
+    assert!(
+        elapsed.as_millis() < 50,
+        "get_cwds took too long: {:?}",
+        elapsed
     );
 }
 
