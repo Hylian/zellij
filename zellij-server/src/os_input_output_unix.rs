@@ -226,7 +226,7 @@ fn handle_openpty(
                 if libc::login_tty(pid_secondary) != 0 {
                     panic!("failed to set controlling terminal");
                 }
-                close_fds::close_open_fds(3, &[]);
+                close_fds_fast(3);
                 Ok(())
             })
             .spawn()
@@ -280,6 +280,40 @@ pub(crate) struct UnixPtyBackend {
     orig_termios: Arc<Mutex<Option<termios::Termios>>>,
     terminal_id_to_raw_fd: Arc<Mutex<BTreeMap<u32, Option<RawFd>>>>,
     next_terminal_id_counter: Arc<AtomicU32>,
+}
+
+/// Close all file descriptors from `min_fd` upwards.
+///
+/// Uses the `close_range` syscall where available, which is O(1) in the kernel
+/// rather than a walk of `/proc/self/fd`. Invoked through `syscall` rather than the
+/// libc wrapper deliberately: the wrapper is only declared for glibc targets, so
+/// musl builds would fail to compile, and it only exists from glibc 2.34, which
+/// would raise the minimum glibc for the whole binary. The syscall number is
+/// available on both.
+///
+/// Falls back to `close_fds` when the syscall is unavailable (Linux < 5.9 answers
+/// ENOSYS) or fails partway; that walk enumerates what is still actually open, so
+/// running it after a partial close is harmless.
+///
+/// Called from `pre_exec`, so everything here must stay async-signal-safe.
+pub(crate) fn close_fds_fast(min_fd: usize) {
+    #[cfg(target_os = "linux")]
+    {
+        let closed = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                min_fd as libc::c_uint,
+                libc::c_uint::MAX,
+                0,
+            )
+        };
+        if closed == 0 {
+            return;
+        }
+    }
+    unsafe {
+        close_fds::close_open_fds(min_fd as i32, &[]);
+    }
 }
 
 /// Try to write as many bytes from `buf` as possible to `fd` without blocking.
