@@ -285,3 +285,43 @@ fn tcgetpgrp_returns_foreground_group() {
         let _ = server.force_kill(child_pid);
     }
 }
+
+#[cfg(not(windows))]
+#[test]
+fn benchmark_close_fds_fast() {
+    use crate::os_input_output_unix::close_fds_fast;
+    let iterations = 100_000;
+
+    let start_fast = std::time::Instant::now();
+    for _ in 0..iterations {
+        close_fds_fast(1024);
+    }
+    let fast_duration = start_fast.elapsed();
+
+    let start_slow = std::time::Instant::now();
+    for _ in 0..iterations {
+        unsafe {
+            close_fds::close_open_fds(1024, &[]);
+        }
+    }
+    let slow_duration = start_slow.elapsed();
+
+    println!("\n=================== CLOSE_FDS BENCHMARK ===================");
+    println!(
+        "close_fds_fast (close_range syscall) (iterations={}):\n  Total: {:.3} ms | Avg per call: {:.3} ns",
+        iterations,
+        fast_duration.as_secs_f64() * 1000.0,
+        fast_duration.as_nanos() as f64 / iterations as f64
+    );
+    println!(
+        "close_fds::close_open_fds (proc read) (iterations={}):\n  Total: {:.3} ms | Avg per call: {:.3} ns",
+        iterations,
+        slow_duration.as_secs_f64() * 1000.0,
+        slow_duration.as_nanos() as f64 / iterations as f64
+    );
+    println!(
+        "Speedup factor: {:.1}x",
+        slow_duration.as_nanos() as f64 / fast_duration.as_nanos() as f64
+    );
+    println!("===========================================================\n");
+}
