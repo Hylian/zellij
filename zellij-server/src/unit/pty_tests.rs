@@ -122,7 +122,7 @@ impl ServerOsApi for MockOsApi {
             .collect();
         (cwds, cmds)
     }
-    fn get_all_cmds_by_ppid(&self, _: &Option<String>) -> HashMap<String, Vec<String>> {
+    fn get_cmds_by_ppid(&self, _ppids: &[u32], _: &Option<String>) -> HashMap<String, Vec<String>> {
         self.cmds_by_ppid.lock().unwrap().clone()
     }
     fn write_to_file(&mut self, _: String, _: Option<String>) -> anyhow::Result<()> {

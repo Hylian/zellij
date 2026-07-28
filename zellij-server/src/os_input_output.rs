@@ -344,8 +344,8 @@ pub trait ServerOsApi: Send + Sync {
     fn get_cwds(&self, _pids: Vec<u32>) -> (HashMap<u32, PathBuf>, HashMap<u32, Vec<String>>) {
         (HashMap::new(), HashMap::new())
     }
-    /// Get a list of all running commands by their parent process id
-    fn get_all_cmds_by_ppid(&self, _post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
+    /// Get a list of running commands by their parent process id
+    fn get_cmds_by_ppid(&self, _ppids: &[u32], _post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
         HashMap::new()
     }
     /// Writes the given buffer to a string
@@ -583,8 +583,44 @@ impl ServerOsApi for ServerOsInputOutput {
 
         (cwds, cmds)
     }
-    #[cfg(unix)]
-    fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
+    #[cfg(target_os = "linux")]
+    fn get_cmds_by_ppid(&self, ppids: &[u32], post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
+        let mut cmds = HashMap::new();
+        for &ppid in ppids {
+            if let Ok(children_str) = std::fs::read_to_string(format!("/proc/{}/task/{}/children", ppid, ppid)) {
+                let children: Vec<u32> = children_str.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+                for child in children {
+                    if let Ok(cmd_bytes) = std::fs::read(format!("/proc/{}/cmdline", child)) {
+                        let cmd: Vec<String> = cmd_bytes
+                            .split(|&b| b == 0)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| String::from_utf8_lossy(s).into_owned())
+                            .collect();
+                        if !cmd.is_empty() {
+                            let cmd = match &post_hook {
+                                Some(post_hook) => {
+                                    let stringified = cmd.join(" ");
+                                    match run_command_hook(&stringified, post_hook) {
+                                        Ok(command) => command,
+                                        Err(e) => {
+                                            log::error!("Post command hook failed to run: {}", e);
+                                            stringified
+                                        },
+                                    }.trim().split_ascii_whitespace().map(|p| p.to_owned()).collect()
+                                },
+                                None => cmd,
+                            };
+                            cmds.insert(ppid.to_string(), cmd);
+                        }
+                    }
+                }
+            }
+        }
+        cmds
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn get_cmds_by_ppid(&self, _ppids: &[u32], post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
         // the key is the stringified ppid
         let mut cmds = HashMap::new();
         if let Some(output) = Command::new("ps")
@@ -632,10 +668,11 @@ impl ServerOsApi for ServerOsInputOutput {
     }
 
     #[cfg(not(unix))]
-    fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
+    fn get_cmds_by_ppid(&self, ppids: &[u32], post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
         let mut system_info = System::new();
         let refresh_kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
-        system_info.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+        let sysinfo_pids: Vec<sysinfo::Pid> = ppids.iter().map(|&p| sysinfo::Pid::from_u32(p)).collect();
+        system_info.refresh_processes_specifics(ProcessesToUpdate::Some(&sysinfo_pids), true, refresh_kind);
         let mut cmds = HashMap::new();
         for (_pid, process) in system_info.processes() {
             if let Some(parent_pid) = process.parent() {

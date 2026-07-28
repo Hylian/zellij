@@ -1957,13 +1957,13 @@ impl Pty {
             .bus
             .os_input
             .as_ref()
-            .map(|os_input| os_input.get_cwds(pids))
+            .map(|os_input| os_input.get_cwds(pids.clone()))
             .unwrap_or_default();
         let ppids_to_cmds = self
             .bus
             .os_input
             .as_ref()
-            .map(|os_input| os_input.get_all_cmds_by_ppid(&self.post_command_discovery_hook))
+            .map(|os_input| os_input.get_cmds_by_ppid(&pids, &self.post_command_discovery_hook))
             .unwrap_or_default();
 
         for terminal_id in terminal_ids {
@@ -2130,7 +2130,7 @@ impl Pty {
             .bus
             .os_input
             .as_ref()
-            .map(|os_input| os_input.get_all_cmds_by_ppid(&self.post_command_discovery_hook))
+            .map(|os_input| os_input.get_cmds_by_ppid(&active_terminal_ids.iter().filter_map(|id| self.id_to_child_pid.get(id)).copied().collect::<Vec<_>>(), &self.post_command_discovery_hook))
             .unwrap_or_default();
 
         for terminal_id in &active_terminal_ids {
@@ -2283,7 +2283,7 @@ impl Pty {
                     if let Some(os_input) = self.bus.os_input.as_ref() {
                         // First, try to get child process command (e.g., nvim running in bash)
                         let ppids_to_cmds =
-                            os_input.get_all_cmds_by_ppid(&self.post_command_discovery_hook);
+                            os_input.get_cmds_by_ppid(&[child_pid], &self.post_command_discovery_hook);
                         let cmd_ps = ppids_to_cmds.get(&format!("{}", child_pid));
 
                         // If no child process, fall back to parent process (e.g., the shell itself)
