@@ -1518,6 +1518,7 @@ impl MouseHandler {
     pub(crate) fn execute_scroll_step_up(
         tab: &mut Tab,
         point: &Position,
+        lines: usize,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         let err_context = || {
@@ -1527,13 +1528,17 @@ impl MouseHandler {
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
             if let Some(mouse_event) = pane.mouse_scroll_up(&relative_position) {
-                tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
-                    .with_context(err_context)?;
+                for _ in 0..lines {
+                    tab.write_to_terminal_at(mouse_event.clone().into_bytes(), point, client_id)
+                        .with_context(err_context)?;
+                }
             } else if pane.is_alternate_mode_active() {
-                tab.write_to_terminal_at("\u{1b}[A".as_bytes().to_owned(), point, client_id)
-                    .with_context(err_context)?;
+                for _ in 0..lines {
+                    tab.write_to_terminal_at("\u{1b}[A".as_bytes().to_owned(), point, client_id)
+                        .with_context(err_context)?;
+                }
             } else {
-                pane.scroll_up(1, client_id);
+                pane.scroll_up(lines, client_id);
             }
         }
         Ok(MouseEffect::default())
@@ -1561,7 +1566,7 @@ impl MouseHandler {
 
         let mut effect = MouseEffect::default();
         if should_step_immediately {
-            effect = Self::execute_scroll_step_up(tab, point, client_id)?;
+            effect = Self::execute_scroll_step_up(tab, point, 1, client_id)?;
         }
 
         let should_start_drain = if is_test {
@@ -1576,9 +1581,10 @@ impl MouseHandler {
             } else {
                 queue.pending_steps += lines as isize;
             }
-            queue.pending_steps = queue.pending_steps.min(25);
+            queue.pending_steps = queue.pending_steps.min(500);
             if queue.pending_steps > 0 && !queue.is_draining {
                 queue.is_draining = true;
+                queue.drain_start_time = now;
                 true
             } else {
                 false
@@ -1597,6 +1603,7 @@ impl MouseHandler {
     pub(crate) fn execute_scroll_step_down(
         tab: &mut Tab,
         point: &Position,
+        lines: usize,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         let err_context = || {
@@ -1608,13 +1615,17 @@ impl MouseHandler {
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
             if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
-                tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
-                    .with_context(err_context)?;
+                for _ in 0..lines {
+                    tab.write_to_terminal_at(mouse_event.clone().into_bytes(), point, client_id)
+                        .with_context(err_context)?;
+                }
             } else if pane.is_alternate_mode_active() {
-                tab.write_to_terminal_at("\u{1b}[B".as_bytes().to_owned(), point, client_id)
-                    .with_context(err_context)?;
+                for _ in 0..lines {
+                    tab.write_to_terminal_at("\u{1b}[B".as_bytes().to_owned(), point, client_id)
+                        .with_context(err_context)?;
+                }
             } else {
-                pane.scroll_down(1, client_id);
+                pane.scroll_down(lines, client_id);
                 if !pane.is_scrolled() {
                     if let PaneId::Terminal(pid) = pane.pid() {
                         tab.process_pending_vte_events(pid)
@@ -1648,7 +1659,7 @@ impl MouseHandler {
 
         let mut effect = MouseEffect::default();
         if should_step_immediately {
-            effect = Self::execute_scroll_step_down(tab, point, client_id)?;
+            effect = Self::execute_scroll_step_down(tab, point, 1, client_id)?;
         }
 
         let should_start_drain = if is_test {
@@ -1663,9 +1674,10 @@ impl MouseHandler {
             } else {
                 queue.pending_steps -= lines as isize;
             }
-            queue.pending_steps = queue.pending_steps.max(-25);
+            queue.pending_steps = queue.pending_steps.max(-500);
             if queue.pending_steps < 0 && !queue.is_draining {
                 queue.is_draining = true;
+                queue.drain_start_time = now;
                 true
             } else {
                 false

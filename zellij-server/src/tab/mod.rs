@@ -158,15 +158,18 @@ pub struct SmoothScrollQueue {
     pub pending_steps: isize,
     pub last_position: Position,
     pub last_step_time: Instant,
+    pub drain_start_time: Instant,
     pub is_draining: bool,
 }
 
 impl Default for SmoothScrollQueue {
     fn default() -> Self {
+        let past = Instant::now() - std::time::Duration::from_secs(1);
         Self {
             pending_steps: 0,
             last_position: Position::new(0, 0),
-            last_step_time: Instant::now() - std::time::Duration::from_secs(1),
+            last_step_time: past,
+            drain_start_time: past,
             is_draining: false,
         }
     }
@@ -4671,23 +4674,46 @@ impl Tab {
     }
 
     pub fn drain_smooth_scroll_step(&mut self, client_id: ClientId) -> Result<MouseEffect> {
+        let now = Instant::now();
         let (step_to_execute, position, has_more) = {
             if let Some(queue) = self.smooth_scroll_queues.get_mut(&client_id) {
-                queue.last_step_time = Instant::now();
-                if queue.pending_steps > 0 {
-                    queue.pending_steps -= 1;
-                    let has_more = queue.pending_steps > 0;
-                    if !has_more {
-                        queue.is_draining = false;
+                queue.last_step_time = now;
+                let abs_pending = queue.pending_steps.unsigned_abs();
+                if abs_pending > 0 {
+                    const MAX_ANIMATION_DURATION_MS: u128 = 200;
+                    const FRAME_DURATION_MS: u128 = 14;
+
+                    let elapsed = now.duration_since(queue.drain_start_time).as_millis();
+                    let remaining_ms = MAX_ANIMATION_DURATION_MS.saturating_sub(elapsed);
+                    let remaining_frames =
+                        ((remaining_ms + FRAME_DURATION_MS - 1) / FRAME_DURATION_MS).max(1) as usize;
+
+                    let min_steps_to_finish =
+                        (abs_pending + remaining_frames - 1) / remaining_frames;
+
+                    let log_steps = if abs_pending <= 3 {
+                        1
+                    } else {
+                        (1.0 + 1.8 * ((abs_pending as f32) / 2.0).ln()).round() as usize
+                    };
+
+                    let count = min_steps_to_finish.max(log_steps).max(1).min(abs_pending);
+
+                    if queue.pending_steps > 0 {
+                        queue.pending_steps -= count as isize;
+                        let has_more = queue.pending_steps > 0;
+                        if !has_more {
+                            queue.is_draining = false;
+                        }
+                        (Some((1, count)), queue.last_position, has_more)
+                    } else {
+                        queue.pending_steps += count as isize;
+                        let has_more = queue.pending_steps < 0;
+                        if !has_more {
+                            queue.is_draining = false;
+                        }
+                        (Some((-1, count)), queue.last_position, has_more)
                     }
-                    (Some(1), queue.last_position, has_more)
-                } else if queue.pending_steps < 0 {
-                    queue.pending_steps += 1;
-                    let has_more = queue.pending_steps < 0;
-                    if !has_more {
-                        queue.is_draining = false;
-                    }
-                    (Some(-1), queue.last_position, has_more)
                 } else {
                     queue.is_draining = false;
                     (None, queue.last_position, false)
@@ -4698,8 +4724,12 @@ impl Tab {
         };
 
         let effect = match step_to_execute {
-            Some(1) => MouseHandler::execute_scroll_step_up(self, &position, client_id)?,
-            Some(-1) => MouseHandler::execute_scroll_step_down(self, &position, client_id)?,
+            Some((1, count)) => {
+                MouseHandler::execute_scroll_step_up(self, &position, count, client_id)?
+            },
+            Some((-1, count)) => {
+                MouseHandler::execute_scroll_step_down(self, &position, count, client_id)?
+            },
             _ => MouseEffect::default(),
         };
 
