@@ -239,6 +239,7 @@ pub(crate) struct Tab {
     mouse_hover_effects: bool,
     focus_follows_mouse: bool,
     mouse_click_through: bool,
+    pub scroll_acceleration_factor: f32,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
     connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     // the below are the configured values - the ones that will be set if and when the web server
@@ -783,6 +784,7 @@ impl Tab {
         mouse_hover_effects: bool,
         focus_follows_mouse: bool,
         mouse_click_through: bool,
+        scroll_acceleration_factor: f32,
         web_server_ip: IpAddr,
         web_server_port: u16,
     ) -> Self {
@@ -893,6 +895,7 @@ impl Tab {
             mouse_hover_effects,
             focus_follows_mouse,
             mouse_click_through,
+            scroll_acceleration_factor,
             connected_clients_in_app,
             web_server_ip,
             web_server_port,
@@ -4684,7 +4687,7 @@ impl Tab {
                 queue.last_step_time = now;
                 let abs_pending = queue.pending_steps.unsigned_abs();
                 if abs_pending > 0 {
-                    const MAX_ANIMATION_DURATION_MS: u128 = 200;
+                    const MAX_ANIMATION_DURATION_MS: u128 = 300;
                     const FRAME_DURATION_MS: u128 = 14;
 
                     let elapsed = now.duration_since(queue.drain_start_time).as_millis();
@@ -5821,6 +5824,9 @@ impl Tab {
     }
     pub fn update_mouse_click_through(&mut self, mouse_click_through: bool) {
         self.mouse_click_through = mouse_click_through;
+    }
+    pub fn update_scroll_acceleration_factor(&mut self, factor: f32) {
+        self.scroll_acceleration_factor = factor;
     }
     pub fn clear_mouse_hover_state(&mut self) {
         self.mouse_hover_pane_id.clear();

@@ -2366,6 +2366,51 @@ macro_rules! kdl_property_first_arg_as_i64_or_error {
 }
 
 #[macro_export]
+macro_rules! kdl_property_first_arg_as_f64_or_error {
+    ( $kdl_node:expr, $property_name:expr ) => {{
+        match $kdl_node.get($property_name) {
+            Some(property) => match property.entries().iter().next() {
+                Some(first_entry) => {
+                    let val = first_entry
+                        .value()
+                        .as_f64()
+                        .or_else(|| first_entry.value().as_i64().map(|i| i as f64));
+                    match val {
+                        Some(float_entry) => Some((float_entry, first_entry)),
+                        None => {
+                            return Err(ConfigError::new_kdl_error(
+                                format!(
+                                    "Property {} must be numeric, found {}",
+                                    $property_name,
+                                    first_entry.value()
+                                ),
+                                property.span().offset(),
+                                property.span().len(),
+                            ));
+                        },
+                    }
+                },
+                None => {
+                    return Err(ConfigError::new_kdl_error(
+                        format!("Property {} must have a value", $property_name),
+                        property.span().offset(),
+                        property.span().len(),
+                    ));
+                },
+            },
+            None => None,
+        }
+    }};
+    ( $kdl_node:expr, $property_name:expr, $property_alt:expr ) => {{
+        let res = kdl_property_first_arg_as_f64_or_error!($kdl_node, $property_name);
+        match res {
+            Some(v) => Some(v),
+            None => kdl_property_first_arg_as_f64_or_error!($kdl_node, $property_alt),
+        }
+    }};
+}
+
+#[macro_export]
 macro_rules! kdl_has_string_argument {
     ( $kdl_node:expr, $string_argument:expr ) => {
         $kdl_node
@@ -2824,6 +2869,12 @@ impl Options {
         let mouse_click_through =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "mouse_click_through")
                 .map(|(v, _)| v);
+        let scroll_acceleration_factor = kdl_property_first_arg_as_f64_or_error!(
+            kdl_options,
+            "scroll_acceleration_factor",
+            "acceleration_factor"
+        )
+        .map(|(v, _)| v as f32);
 
         Ok(Options {
             simplified_ui,
@@ -2872,6 +2923,7 @@ impl Options {
             web_server_key,
             enforce_https_for_localhost,
             post_command_discovery_hook,
+            scroll_acceleration_factor,
             client_async_worker_tasks,
         })
     }
@@ -4396,7 +4448,40 @@ impl Options {
         {
             nodes.push(client_async_worker_tasks);
         }
+        if let Some(scroll_acceleration_factor) =
+            self.scroll_acceleration_factor_to_kdl(add_comments)
+        {
+            nodes.push(scroll_acceleration_factor);
+        }
         nodes
+    }
+    fn scroll_acceleration_factor_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}",
+            " ",
+            "// Max acceleration multiplier for continuous trackpad/mouse wheel scrolling",
+            "// Default: 3.5 (1.0 to disable acceleration)",
+            "// ",
+        );
+
+        let create_node = |val: f32| -> KdlNode {
+            let mut node = KdlNode::new("scroll_acceleration_factor");
+            node.push(KdlValue::Base10Float(val as f64));
+            node
+        };
+        if let Some(scroll_acceleration_factor) = self.scroll_acceleration_factor {
+            let mut node = create_node(scroll_acceleration_factor);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(3.5);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
     }
 }
 

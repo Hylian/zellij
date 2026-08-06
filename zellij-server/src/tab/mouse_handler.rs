@@ -1567,18 +1567,20 @@ impl MouseHandler {
 
         let mut effect = MouseEffect::default();
         if should_step_immediately {
-            effect = Self::execute_scroll_step_up(tab, point, 1, client_id)?;
+            let immediate_lines = if is_test { lines } else { 1 };
+            effect = Self::execute_scroll_step_up(tab, point, immediate_lines, client_id)?;
         }
 
         let should_start_drain = if is_test {
             false
         } else {
+            let max_accel = tab.scroll_acceleration_factor.max(1.0);
             let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
             let dt = now.duration_since(queue.last_event_time).as_millis();
             queue.last_event_time = now;
-            if dt < 120 {
-                queue.acceleration_factor = (queue.acceleration_factor + 0.15).min(3.5);
-            } else if dt >= 200 {
+            if dt < 120 && max_accel > 1.0 {
+                queue.acceleration_factor = (queue.acceleration_factor + 0.15).min(max_accel);
+            } else if dt >= 200 || max_accel <= 1.0 {
                 queue.acceleration_factor = 1.0;
             }
 
@@ -1675,18 +1677,20 @@ impl MouseHandler {
 
         let mut effect = MouseEffect::default();
         if should_step_immediately {
-            effect = Self::execute_scroll_step_down(tab, point, 1, client_id)?;
+            let immediate_lines = if is_test { lines } else { 1 };
+            effect = Self::execute_scroll_step_down(tab, point, immediate_lines, client_id)?;
         }
 
         let should_start_drain = if is_test {
             false
         } else {
+            let max_accel = tab.scroll_acceleration_factor.max(1.0);
             let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
             let dt = now.duration_since(queue.last_event_time).as_millis();
             queue.last_event_time = now;
-            if dt < 120 {
-                queue.acceleration_factor = (queue.acceleration_factor + 0.15).min(3.5);
-            } else if dt >= 200 {
+            if dt < 120 && max_accel > 1.0 {
+                queue.acceleration_factor = (queue.acceleration_factor + 0.15).min(max_accel);
+            } else if dt >= 200 || max_accel <= 1.0 {
                 queue.acceleration_factor = 1.0;
             }
 

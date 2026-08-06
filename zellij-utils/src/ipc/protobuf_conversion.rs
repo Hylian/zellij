@@ -732,6 +732,7 @@ impl From<crate::input::options::Options>
             visual_bell: options.visual_bell,
             focus_follows_mouse: options.focus_follows_mouse,
             mouse_click_through: options.mouse_click_through,
+            scroll_acceleration_factor: options.scroll_acceleration_factor,
         }
     }
 }
@@ -829,6 +830,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
             visual_bell: options.visual_bell,
             focus_follows_mouse: options.focus_follows_mouse,
             mouse_click_through: options.mouse_click_through,
+            scroll_acceleration_factor: options.scroll_acceleration_factor,
         })
     }
 }

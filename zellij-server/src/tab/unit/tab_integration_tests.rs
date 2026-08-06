@@ -275,6 +275,7 @@ fn create_new_tab(size: Size, default_mode: ModeInfo) -> Tab {
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         web_server_ip,
         web_server_port,
     );
@@ -362,6 +363,7 @@ fn create_new_tab_without_pane_frames(size: Size, default_mode: ModeInfo) -> Tab
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         web_server_ip,
         web_server_port,
     );
@@ -464,6 +466,7 @@ fn create_new_tab_with_swap_layouts(
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         web_server_ip,
         web_server_port,
     );
@@ -567,6 +570,7 @@ fn create_new_tab_with_os_api(
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         web_server_ip,
         web_server_port,
     );
@@ -656,6 +660,7 @@ fn create_new_tab_with_layout(size: Size, default_mode: ModeInfo, layout: &str) 
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         web_server_ip,
         web_server_port,
     );
@@ -759,6 +764,7 @@ fn create_new_tab_with_mock_pty_writer(
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         web_server_ip,
         web_server_port,
     );
@@ -853,6 +859,7 @@ fn create_new_tab_with_sixel_support(
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         web_server_ip,
         web_server_port,
     );
@@ -12560,6 +12567,7 @@ fn create_new_tab_with_plugin_receiver(
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         web_server_ip,
         web_server_port,
     );
@@ -14344,6 +14352,7 @@ fn create_new_tab_with_server_receiver(
         true,  // mouse_hover_effects
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         8080,
     );

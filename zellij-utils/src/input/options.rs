@@ -271,6 +271,11 @@ pub struct Options {
     #[clap(long, value_parser)]
     pub post_command_discovery_hook: Option<String>,
 
+    /// Max acceleration multiplier for rapid continuous scrolling (default is 3.5)
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub scroll_acceleration_factor: Option<f32>,
+
     /// Number of async worker tasks to spawn per active client.
     ///
     /// Allocating few tasks may result in resource contention and lags. Small values (around 4)
@@ -384,6 +389,9 @@ impl Options {
         let client_async_worker_tasks = other
             .client_async_worker_tasks
             .or(self.client_async_worker_tasks);
+        let scroll_acceleration_factor = other
+            .scroll_acceleration_factor
+            .or(self.scroll_acceleration_factor);
 
         Options {
             simplified_ui,
@@ -432,6 +440,7 @@ impl Options {
             web_server_key,
             enforce_https_for_localhost,
             post_command_discovery_hook,
+            scroll_acceleration_factor,
             client_async_worker_tasks,
         }
     }
@@ -519,6 +528,9 @@ impl Options {
         let client_async_worker_tasks = other
             .client_async_worker_tasks
             .or(self.client_async_worker_tasks);
+        let scroll_acceleration_factor = other
+            .scroll_acceleration_factor
+            .or(self.scroll_acceleration_factor);
 
         Options {
             simplified_ui,
@@ -567,6 +579,7 @@ impl Options {
             web_server_key,
             enforce_https_for_localhost,
             post_command_discovery_hook,
+            scroll_acceleration_factor,
             client_async_worker_tasks,
         }
     }
