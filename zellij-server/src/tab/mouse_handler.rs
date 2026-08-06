@@ -1553,16 +1553,81 @@ impl MouseHandler {
         let is_test = cfg!(test);
         let scroll_frame_interval = std::time::Duration::from_millis(14);
         let now = std::time::Instant::now();
-        let should_step_immediately = if is_test {
-            true
+
+        let max_accel = tab.scroll_acceleration_factor.max(1.0);
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.last_position = *point;
+
+        let dt = now.duration_since(queue.last_event_time).as_millis();
+        queue.last_event_time = now;
+
+        // 1. If moving in opposing direction (was flinging down: velocity < 0.0),
+        //    stop immediately and reset acceleration.
+        let was_opposing = queue.velocity < -0.01;
+        if was_opposing {
+            queue.velocity = 0.0;
+            queue.fractional_step = 0.0;
+            queue.is_draining = false;
+            queue.acceleration_factor = 1.0;
+        }
+
+        // 2. If after >= 300ms, stop any running fling and reset acceleration.
+        if dt >= 300 {
+            queue.velocity = 0.0;
+            queue.fractional_step = 0.0;
+            queue.is_draining = false;
+            queue.acceleration_factor = 1.0;
+        } else if !was_opposing && max_accel > 1.0 {
+            // Responsive acceleration ramp within 300ms window
+            let ramp = if dt < 50 {
+                0.40
+            } else if dt < 150 {
+                0.25
+            } else {
+                0.12
+            };
+            let line_weight = (lines as f32).clamp(1.0, 3.0);
+            queue.acceleration_factor =
+                (queue.acceleration_factor + ramp * line_weight).min(max_accel);
+        }
+
+        let impulse = (lines as f32) * queue.acceleration_factor;
+
+        let (should_step_immediately, should_start_drain) = if is_test {
+            (true, false)
         } else {
-            let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
-            queue.last_position = *point;
-            if queue.pending_steps < 0 {
-                queue.pending_steps = 0;
-                queue.acceleration_factor = 1.0;
+            // Snappy initial response: step immediately if frame interval elapsed
+            let can_step_immediate = !queue.is_draining
+                && now.duration_since(queue.last_step_time) >= scroll_frame_interval;
+
+            let (step_now, impulse_for_queue) = if can_step_immediate {
+                if lines == 1 && queue.acceleration_factor <= 1.1 {
+                    // Precision single tick: step immediately, no lingering fling velocity
+                    (true, 0.0)
+                } else {
+                    // Larger or accelerated swipe: step 1 line now, queue the rest as momentum
+                    (true, (impulse - 1.0).max(0.0))
+                }
+            } else {
+                // Already draining or fast consecutive events: feed full impulse into fling velocity
+                (false, impulse)
+            };
+
+            // Add velocity (positive for UP). Cap at 50.0 lines/frame.
+            if impulse_for_queue > 0.0 {
+                queue.velocity = (queue.velocity.max(0.0) + impulse_for_queue * 0.45).min(50.0);
             }
-            !queue.is_draining && now.duration_since(queue.last_step_time) >= scroll_frame_interval
+
+            if step_now {
+                queue.last_step_time = now;
+            }
+
+            let start_drain = queue.velocity.abs() > 0.1 && !queue.is_draining;
+            if start_drain {
+                queue.is_draining = true;
+            }
+
+            (step_now, start_drain)
         };
 
         let mut effect = MouseEffect::default();
@@ -1570,43 +1635,6 @@ impl MouseHandler {
             let immediate_lines = if is_test { lines } else { 1 };
             effect = Self::execute_scroll_step_up(tab, point, immediate_lines, client_id)?;
         }
-
-        let should_start_drain = if is_test {
-            false
-        } else {
-            let max_accel = tab.scroll_acceleration_factor.max(1.0);
-            let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
-            let dt = now.duration_since(queue.last_event_time).as_millis();
-            queue.last_event_time = now;
-            if dt < 120 && max_accel > 1.0 {
-                queue.acceleration_factor = (queue.acceleration_factor + 0.15).min(max_accel);
-            } else if dt >= 200 || max_accel <= 1.0 {
-                queue.acceleration_factor = 1.0;
-            }
-
-            let lines_to_enqueue = if should_step_immediately {
-                if lines > 1 {
-                    (lines - 1) as f32 * queue.acceleration_factor
-                } else {
-                    0.0
-                }
-            } else {
-                (lines as f32 * queue.acceleration_factor).max(1.0)
-            };
-
-            queue.pending_steps += lines_to_enqueue.round() as isize;
-            if should_step_immediately {
-                queue.last_step_time = now;
-            }
-            queue.pending_steps = queue.pending_steps.min(500);
-            if queue.pending_steps > 0 && !queue.is_draining {
-                queue.is_draining = true;
-                queue.drain_start_time = now;
-                true
-            } else {
-                false
-            }
-        };
 
         if should_start_drain {
             let _ = tab
@@ -1663,16 +1691,81 @@ impl MouseHandler {
         let is_test = cfg!(test);
         let scroll_frame_interval = std::time::Duration::from_millis(14);
         let now = std::time::Instant::now();
-        let should_step_immediately = if is_test {
-            true
+
+        let max_accel = tab.scroll_acceleration_factor.max(1.0);
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.last_position = *point;
+
+        let dt = now.duration_since(queue.last_event_time).as_millis();
+        queue.last_event_time = now;
+
+        // 1. If moving in opposing direction (was flinging up: velocity > 0.0),
+        //    stop immediately and reset acceleration.
+        let was_opposing = queue.velocity > 0.01;
+        if was_opposing {
+            queue.velocity = 0.0;
+            queue.fractional_step = 0.0;
+            queue.is_draining = false;
+            queue.acceleration_factor = 1.0;
+        }
+
+        // 2. If after >= 300ms, stop any running fling and reset acceleration.
+        if dt >= 300 {
+            queue.velocity = 0.0;
+            queue.fractional_step = 0.0;
+            queue.is_draining = false;
+            queue.acceleration_factor = 1.0;
+        } else if !was_opposing && max_accel > 1.0 {
+            // Responsive acceleration ramp within 300ms window
+            let ramp = if dt < 50 {
+                0.40
+            } else if dt < 150 {
+                0.25
+            } else {
+                0.12
+            };
+            let line_weight = (lines as f32).clamp(1.0, 3.0);
+            queue.acceleration_factor =
+                (queue.acceleration_factor + ramp * line_weight).min(max_accel);
+        }
+
+        let impulse = (lines as f32) * queue.acceleration_factor;
+
+        let (should_step_immediately, should_start_drain) = if is_test {
+            (true, false)
         } else {
-            let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
-            queue.last_position = *point;
-            if queue.pending_steps > 0 {
-                queue.pending_steps = 0;
-                queue.acceleration_factor = 1.0;
+            // Snappy initial response: step immediately if frame interval elapsed
+            let can_step_immediate = !queue.is_draining
+                && now.duration_since(queue.last_step_time) >= scroll_frame_interval;
+
+            let (step_now, impulse_for_queue) = if can_step_immediate {
+                if lines == 1 && queue.acceleration_factor <= 1.1 {
+                    // Precision single tick: step immediately, no lingering fling velocity
+                    (true, 0.0)
+                } else {
+                    // Larger or accelerated swipe: step 1 line now, queue the rest as momentum
+                    (true, (impulse - 1.0).max(0.0))
+                }
+            } else {
+                // Already draining or fast consecutive events: feed full impulse into fling velocity
+                (false, impulse)
+            };
+
+            // Add velocity (negative for DOWN). Cap at 50.0 lines/frame.
+            if impulse_for_queue > 0.0 {
+                queue.velocity = (queue.velocity.min(0.0) - impulse_for_queue * 0.45).max(-50.0);
             }
-            !queue.is_draining && now.duration_since(queue.last_step_time) >= scroll_frame_interval
+
+            if step_now {
+                queue.last_step_time = now;
+            }
+
+            let start_drain = queue.velocity.abs() > 0.1 && !queue.is_draining;
+            if start_drain {
+                queue.is_draining = true;
+            }
+
+            (step_now, start_drain)
         };
 
         let mut effect = MouseEffect::default();
@@ -1680,43 +1773,6 @@ impl MouseHandler {
             let immediate_lines = if is_test { lines } else { 1 };
             effect = Self::execute_scroll_step_down(tab, point, immediate_lines, client_id)?;
         }
-
-        let should_start_drain = if is_test {
-            false
-        } else {
-            let max_accel = tab.scroll_acceleration_factor.max(1.0);
-            let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
-            let dt = now.duration_since(queue.last_event_time).as_millis();
-            queue.last_event_time = now;
-            if dt < 120 && max_accel > 1.0 {
-                queue.acceleration_factor = (queue.acceleration_factor + 0.15).min(max_accel);
-            } else if dt >= 200 || max_accel <= 1.0 {
-                queue.acceleration_factor = 1.0;
-            }
-
-            let lines_to_enqueue = if should_step_immediately {
-                if lines > 1 {
-                    (lines - 1) as f32 * queue.acceleration_factor
-                } else {
-                    0.0
-                }
-            } else {
-                (lines as f32 * queue.acceleration_factor).max(1.0)
-            };
-
-            queue.pending_steps -= lines_to_enqueue.round() as isize;
-            if should_step_immediately {
-                queue.last_step_time = now;
-            }
-            queue.pending_steps = queue.pending_steps.max(-500);
-            if queue.pending_steps < 0 && !queue.is_draining {
-                queue.is_draining = true;
-                queue.drain_start_time = now;
-                true
-            } else {
-                false
-            }
-        };
 
         if should_start_drain {
             let _ = tab

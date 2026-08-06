@@ -155,11 +155,11 @@ enum BufferedTabInstruction {
 
 #[derive(Debug, Clone)]
 pub struct SmoothScrollQueue {
-    pub pending_steps: isize,
+    pub velocity: f32,
+    pub fractional_step: f32,
     pub last_position: Position,
     pub last_step_time: Instant,
     pub last_event_time: Instant,
-    pub drain_start_time: Instant,
     pub acceleration_factor: f32,
     pub is_draining: bool,
 }
@@ -168,11 +168,11 @@ impl Default for SmoothScrollQueue {
     fn default() -> Self {
         let past = Instant::now() - std::time::Duration::from_secs(1);
         Self {
-            pending_steps: 0,
+            velocity: 0.0,
+            fractional_step: 0.0,
             last_position: Position::new(0, 0),
             last_step_time: past,
             last_event_time: past,
-            drain_start_time: past,
             acceleration_factor: 1.0,
             is_draining: false,
         }
@@ -4682,46 +4682,39 @@ impl Tab {
 
     pub fn drain_smooth_scroll_step(&mut self, client_id: ClientId) -> Result<MouseEffect> {
         let now = Instant::now();
+        const FRICTION: f32 = 0.92;
+        const MIN_VELOCITY: f32 = 0.12;
+
         let (step_to_execute, position, has_more) = {
             if let Some(queue) = self.smooth_scroll_queues.get_mut(&client_id) {
                 queue.last_step_time = now;
-                let abs_pending = queue.pending_steps.unsigned_abs();
-                if abs_pending > 0 {
-                    const MAX_ANIMATION_DURATION_MS: u128 = 300;
-                    const FRAME_DURATION_MS: u128 = 14;
+                let vel = queue.velocity;
+                let abs_vel = vel.abs();
 
-                    let elapsed = now.duration_since(queue.drain_start_time).as_millis();
-                    let remaining_ms = MAX_ANIMATION_DURATION_MS.saturating_sub(elapsed);
-                    let remaining_frames =
-                        ((remaining_ms + FRAME_DURATION_MS - 1) / FRAME_DURATION_MS).max(1) as usize;
+                if abs_vel >= MIN_VELOCITY {
+                    let dir = if vel > 0.0 { 1 } else { -1 };
+                    queue.fractional_step += abs_vel;
+                    let lines = queue.fractional_step.floor() as usize;
+                    queue.fractional_step -= lines as f32;
 
-                    let min_steps_to_finish =
-                        (abs_pending + remaining_frames - 1) / remaining_frames;
+                    // Apply friction decay per frame
+                    queue.velocity *= FRICTION;
 
-                    let log_steps = if abs_pending <= 3 {
-                        1
+                    let has_more = queue.velocity.abs() >= MIN_VELOCITY;
+                    if !has_more {
+                        queue.velocity = 0.0;
+                        queue.fractional_step = 0.0;
+                        queue.is_draining = false;
+                    }
+
+                    if lines > 0 {
+                        (Some((dir, lines)), queue.last_position, has_more)
                     } else {
-                        (1.0 + 1.8 * ((abs_pending as f32) / 2.0).ln()).round() as usize
-                    };
-
-                    let count = min_steps_to_finish.max(log_steps).max(1).min(abs_pending);
-
-                    if queue.pending_steps > 0 {
-                        queue.pending_steps -= count as isize;
-                        let has_more = queue.pending_steps > 0;
-                        if !has_more {
-                            queue.is_draining = false;
-                        }
-                        (Some((1, count)), queue.last_position, has_more)
-                    } else {
-                        queue.pending_steps += count as isize;
-                        let has_more = queue.pending_steps < 0;
-                        if !has_more {
-                            queue.is_draining = false;
-                        }
-                        (Some((-1, count)), queue.last_position, has_more)
+                        (None, queue.last_position, has_more)
                     }
                 } else {
+                    queue.velocity = 0.0;
+                    queue.fractional_step = 0.0;
                     queue.is_draining = false;
                     (None, queue.last_position, false)
                 }

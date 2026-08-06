@@ -11470,6 +11470,121 @@ fn test_scroll_wheel_down_scrolls_pane() {
 }
 
 #[test]
+fn test_smooth_scroll_momentum_friction_drain() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    let mut content = String::new();
+    for i in 0..100 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    // Set up an active fling velocity in the queue
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.velocity = 5.0;
+        queue.is_draining = true;
+        queue.last_position = Position::new(10, 60);
+    }
+
+    // Step through the drain frames and verify velocity decays under friction to 0
+    for _ in 0..60 {
+        let prev_vel = tab
+            .smooth_scroll_queues
+            .get(&client_id)
+            .map(|q| q.velocity)
+            .unwrap_or(0.0);
+        let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+        let cur_vel = tab
+            .smooth_scroll_queues
+            .get(&client_id)
+            .map(|q| q.velocity)
+            .unwrap_or(0.0);
+        if prev_vel > 0.0 && cur_vel > 0.0 {
+            assert!(cur_vel < prev_vel, "Velocity should decelerate with friction");
+        }
+        if !tab
+            .smooth_scroll_queues
+            .get(&client_id)
+            .map(|q| q.is_draining)
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+
+    // Queue should now be completely at rest
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.velocity, 0.0);
+    assert!(!queue.is_draining);
+}
+
+#[test]
+fn test_opposing_scroll_stops_fling_and_resets_acceleration() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    // 1. Simulate an upward fling in progress
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.velocity = 10.0;
+        queue.acceleration_factor = 3.5;
+        queue.is_draining = true;
+        queue.last_event_time = std::time::Instant::now();
+    }
+
+    // 2. An opposing scroll down should stop the fling immediately and reset acceleration
+    tab.handle_mouse_event(
+        &MouseEvent::new_scroll_down_event(Position::new(10, 60)),
+        client_id,
+    )
+    .unwrap();
+
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.acceleration_factor, 1.0);
+}
+
+#[test]
+fn test_scroll_after_300ms_stops_fling_and_resets_acceleration() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    // 1. Set up an active fling from 400ms ago
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.velocity = 8.0;
+        queue.acceleration_factor = 3.2;
+        queue.is_draining = true;
+        queue.last_event_time =
+            std::time::Instant::now() - std::time::Duration::from_millis(400);
+    }
+
+    // 2. New scroll after >300ms should reset acceleration and cancel prior fling
+    tab.handle_mouse_event(
+        &MouseEvent::new_scroll_up_event(Position::new(10, 60)),
+        client_id,
+    )
+    .unwrap();
+
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.acceleration_factor, 1.0);
+}
+
+#[test]
 fn test_scroll_on_inactive_pane_scrolls_that_pane() {
     let size = Size {
         cols: 121,
