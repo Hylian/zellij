@@ -207,6 +207,8 @@ pub(crate) struct Tab {
     mouse_hover_pane_id: HashMap<ClientId, PaneId>,
     mouse_help_text_visible: HashMap<ClientId, bool>,
     last_mouse_activity_time: HashMap<ClientId, Instant>,
+    #[allow(dead_code)]
+    pub last_mouse_scroll_time: HashMap<ClientId, Instant>,
     current_pane_group: Rc<RefCell<PaneGroups>>,
     advanced_mouse_actions: bool,
     mouse_hover_effects: bool,
@@ -859,6 +861,7 @@ impl Tab {
             mouse_hover_pane_id: HashMap::new(),
             mouse_help_text_visible: HashMap::new(),
             last_mouse_activity_time: HashMap::new(),
+            last_mouse_scroll_time: HashMap::new(),
             current_pane_group,
             currently_marking_pane_group,
             advanced_mouse_actions,

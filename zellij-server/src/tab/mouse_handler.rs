@@ -1525,6 +1525,18 @@ impl MouseHandler {
             format!("failed to handle scrollwheel up at position {point:?} for client {client_id}")
         };
 
+        #[cfg(not(test))]
+        {
+            let min_scroll_interval = std::time::Duration::from_millis(15);
+            let now = std::time::Instant::now();
+            if let Some(last_time) = tab.last_mouse_scroll_time.get(&client_id) {
+                if now.duration_since(*last_time) < min_scroll_interval {
+                    return Ok(MouseEffect::default());
+                }
+            }
+            tab.last_mouse_scroll_time.insert(client_id, now);
+        }
+
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
             if let Some(mouse_event) = pane.mouse_scroll_up(&relative_position) {
@@ -1555,6 +1567,18 @@ impl MouseHandler {
                 "failed to handle scrollwheel down at position {point:?} for client {client_id}"
             )
         };
+
+        #[cfg(not(test))]
+        {
+            let min_scroll_interval = std::time::Duration::from_millis(15);
+            let now = std::time::Instant::now();
+            if let Some(last_time) = tab.last_mouse_scroll_time.get(&client_id) {
+                if now.duration_since(*last_time) < min_scroll_interval {
+                    return Ok(MouseEffect::default());
+                }
+            }
+            tab.last_mouse_scroll_time.insert(client_id, now);
+        }
 
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
