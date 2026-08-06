@@ -1560,6 +1560,7 @@ impl MouseHandler {
             queue.last_position = *point;
             if queue.pending_steps < 0 {
                 queue.pending_steps = 0;
+                queue.acceleration_factor = 1.0;
             }
             !queue.is_draining && now.duration_since(queue.last_step_time) >= scroll_frame_interval
         };
@@ -1573,13 +1574,27 @@ impl MouseHandler {
             false
         } else {
             let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
-            if should_step_immediately {
-                queue.last_step_time = now;
+            let dt = now.duration_since(queue.last_event_time).as_millis();
+            queue.last_event_time = now;
+            if dt < 120 {
+                queue.acceleration_factor = (queue.acceleration_factor + 0.15).min(3.5);
+            } else if dt >= 200 {
+                queue.acceleration_factor = 1.0;
+            }
+
+            let lines_to_enqueue = if should_step_immediately {
                 if lines > 1 {
-                    queue.pending_steps += (lines - 1) as isize;
+                    (lines - 1) as f32 * queue.acceleration_factor
+                } else {
+                    0.0
                 }
             } else {
-                queue.pending_steps += lines as isize;
+                (lines as f32 * queue.acceleration_factor).max(1.0)
+            };
+
+            queue.pending_steps += lines_to_enqueue.round() as isize;
+            if should_step_immediately {
+                queue.last_step_time = now;
             }
             queue.pending_steps = queue.pending_steps.min(500);
             if queue.pending_steps > 0 && !queue.is_draining {
@@ -1653,6 +1668,7 @@ impl MouseHandler {
             queue.last_position = *point;
             if queue.pending_steps > 0 {
                 queue.pending_steps = 0;
+                queue.acceleration_factor = 1.0;
             }
             !queue.is_draining && now.duration_since(queue.last_step_time) >= scroll_frame_interval
         };
@@ -1666,13 +1682,27 @@ impl MouseHandler {
             false
         } else {
             let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
-            if should_step_immediately {
-                queue.last_step_time = now;
+            let dt = now.duration_since(queue.last_event_time).as_millis();
+            queue.last_event_time = now;
+            if dt < 120 {
+                queue.acceleration_factor = (queue.acceleration_factor + 0.15).min(3.5);
+            } else if dt >= 200 {
+                queue.acceleration_factor = 1.0;
+            }
+
+            let lines_to_enqueue = if should_step_immediately {
                 if lines > 1 {
-                    queue.pending_steps -= (lines - 1) as isize;
+                    (lines - 1) as f32 * queue.acceleration_factor
+                } else {
+                    0.0
                 }
             } else {
-                queue.pending_steps -= lines as isize;
+                (lines as f32 * queue.acceleration_factor).max(1.0)
+            };
+
+            queue.pending_steps -= lines_to_enqueue.round() as isize;
+            if should_step_immediately {
+                queue.last_step_time = now;
             }
             queue.pending_steps = queue.pending_steps.max(-500);
             if queue.pending_steps < 0 && !queue.is_draining {
