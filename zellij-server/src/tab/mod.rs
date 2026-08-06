@@ -4652,6 +4652,19 @@ impl Tab {
         MouseHandler::handle_scrollwheel_down(self, point, lines, client_id)
     }
 
+    pub fn step_smooth_scroll(
+        &mut self,
+        point: &Position,
+        direction: isize,
+        client_id: ClientId,
+    ) -> Result<MouseEffect> {
+        if direction > 0 {
+            MouseHandler::execute_scroll_step_up(self, point, client_id)
+        } else {
+            MouseHandler::execute_scroll_step_down(self, point, client_id)
+        }
+    }
+
     fn get_pane_id_at(
         &mut self,
         point: &Position,

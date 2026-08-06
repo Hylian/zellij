@@ -1261,10 +1261,10 @@ impl MouseHandler {
                     }
                 }
                 if event.wheel_up {
-                    return Ok(MouseAction::ScrollUp { pane_id, lines: 1 });
+                    return Ok(MouseAction::ScrollUp { pane_id, lines: 3 });
                 }
                 if event.wheel_down {
-                    return Ok(MouseAction::ScrollDown { pane_id, lines: 1 });
+                    return Ok(MouseAction::ScrollDown { pane_id, lines: 3 });
                 }
             }
             return Ok(MouseAction::NoAction);
@@ -1515,27 +1515,14 @@ impl MouseHandler {
         Ok(())
     }
 
-    pub(crate) fn handle_scrollwheel_up(
+    pub(crate) fn execute_scroll_step_up(
         tab: &mut Tab,
         point: &Position,
-        lines: usize,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         let err_context = || {
             format!("failed to handle scrollwheel up at position {point:?} for client {client_id}")
         };
-
-        #[cfg(not(test))]
-        {
-            let min_scroll_interval = std::time::Duration::from_millis(15);
-            let now = std::time::Instant::now();
-            if let Some(last_time) = tab.last_mouse_scroll_time.get(&client_id) {
-                if now.duration_since(*last_time) < min_scroll_interval {
-                    return Ok(MouseEffect::default());
-                }
-            }
-            tab.last_mouse_scroll_time.insert(client_id, now);
-        }
 
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
@@ -1543,14 +1530,60 @@ impl MouseHandler {
                 tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
                     .with_context(err_context)?;
             } else if pane.is_alternate_mode_active() {
-                // faux scrolling, send UP n times
-                // do n separate writes to make sure the sequence gets adjusted for cursor keys mode
-                for _ in 0..lines {
-                    tab.write_to_terminal_at("\u{1b}[A".as_bytes().to_owned(), point, client_id)
-                        .with_context(err_context)?;
-                }
+                tab.write_to_terminal_at("\u{1b}[A".as_bytes().to_owned(), point, client_id)
+                    .with_context(err_context)?;
             } else {
-                pane.scroll_up(lines, client_id);
+                pane.scroll_up(1, client_id);
+            }
+        }
+        Ok(MouseEffect::default())
+    }
+
+    pub(crate) fn handle_scrollwheel_up(
+        tab: &mut Tab,
+        point: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<MouseEffect> {
+        let res = Self::execute_scroll_step_up(tab, point, client_id)?;
+        if lines > 1 {
+            let _ = tab.senders.send_to_background_jobs(BackgroundJob::SmoothScrollSteps {
+                client_id,
+                point: *point,
+                direction: 1,
+                remaining_steps: lines - 1,
+            });
+        }
+        Ok(res)
+    }
+
+    pub(crate) fn execute_scroll_step_down(
+        tab: &mut Tab,
+        point: &Position,
+        client_id: ClientId,
+    ) -> Result<MouseEffect> {
+        let err_context = || {
+            format!(
+                "failed to handle scrollwheel down at position {point:?} for client {client_id}"
+            )
+        };
+
+        if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
+            let relative_position = pane.relative_position(point);
+            if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
+                tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
+                    .with_context(err_context)?;
+            } else if pane.is_alternate_mode_active() {
+                tab.write_to_terminal_at("\u{1b}[B".as_bytes().to_owned(), point, client_id)
+                    .with_context(err_context)?;
+            } else {
+                pane.scroll_down(1, client_id);
+                if !pane.is_scrolled() {
+                    if let PaneId::Terminal(pid) = pane.pid() {
+                        tab.process_pending_vte_events(pid)
+                            .with_context(err_context)?;
+                    }
+                }
             }
         }
         Ok(MouseEffect::default())
@@ -1562,47 +1595,16 @@ impl MouseHandler {
         lines: usize,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
-        let err_context = || {
-            format!(
-                "failed to handle scrollwheel down at position {point:?} for client {client_id}"
-            )
-        };
-
-        #[cfg(not(test))]
-        {
-            let min_scroll_interval = std::time::Duration::from_millis(15);
-            let now = std::time::Instant::now();
-            if let Some(last_time) = tab.last_mouse_scroll_time.get(&client_id) {
-                if now.duration_since(*last_time) < min_scroll_interval {
-                    return Ok(MouseEffect::default());
-                }
-            }
-            tab.last_mouse_scroll_time.insert(client_id, now);
+        let res = Self::execute_scroll_step_down(tab, point, client_id)?;
+        if lines > 1 {
+            let _ = tab.senders.send_to_background_jobs(BackgroundJob::SmoothScrollSteps {
+                client_id,
+                point: *point,
+                direction: -1,
+                remaining_steps: lines - 1,
+            });
         }
-
-        if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
-            let relative_position = pane.relative_position(point);
-            if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
-                tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
-                    .with_context(err_context)?;
-            } else if pane.is_alternate_mode_active() {
-                // faux scrolling, send DOWN n times
-                // do n separate writes to make sure the sequence gets adjusted for cursor keys mode
-                for _ in 0..lines {
-                    tab.write_to_terminal_at("\u{1b}[B".as_bytes().to_owned(), point, client_id)
-                        .with_context(err_context)?;
-                }
-            } else {
-                pane.scroll_down(lines, client_id);
-                if !pane.is_scrolled() {
-                    if let PaneId::Terminal(pid) = pane.pid() {
-                        tab.process_pending_vte_events(pid)
-                            .with_context(err_context)?;
-                    }
-                }
-            }
-        }
-        Ok(MouseEffect::default())
+        Ok(res)
     }
 
     fn handle_resize_scroll_up(
