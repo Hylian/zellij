@@ -1561,7 +1561,8 @@ impl MouseHandler {
         let dt = now.duration_since(queue.last_event_time).as_millis();
         queue.last_event_time = now;
 
-        // 1. If moving in opposing direction (was flinging down: velocity < 0.0),
+        // 1. Opposing direction check:
+        //    If moving in opposing direction (was flinging down: velocity < 0.0),
         //    stop immediately.
         let was_opposing = queue.velocity < -0.01;
         if was_opposing {
@@ -1570,18 +1571,28 @@ impl MouseHandler {
             queue.is_draining = false;
         }
 
-        // 2. Gesture flickiness / timing:
+        // 2. Gesture flickiness / timing & acceleration:
         //    Normalized speed in lines per 14ms frame:
         let instantaneous_speed = (lines as f32 * 14.0) / (dt.max(4) as f32);
-        let is_flick =
-            dt < 65 && instantaneous_speed >= 0.35 && tab.scroll_acceleration_factor > 1.0;
+        let prev_speed = queue.prev_instantaneous_speed;
+        queue.prev_instantaneous_speed = instantaneous_speed;
 
-        // 3. When applying more swipes in the same direction, a slow swipe resets the fling
-        //    (grabbing the viewport and sliding it directly).
-        if !is_flick && queue.is_draining {
-            queue.velocity = 0.0;
-            queue.fractional_step = 0.0;
-            queue.is_draining = false;
+        // Gesture acceleration: is this stroke accelerating relative to previous event?
+        let gesture_is_accelerating = instantaneous_speed > prev_speed + 0.1;
+        let is_fast = dt < 70 && instantaneous_speed >= 0.45;
+
+        let current_velocity = queue.velocity.max(0.0);
+
+        // 3. Grab vs Fling/Accelerate detection:
+        if queue.is_draining && !was_opposing {
+            // Viewport is currently flinging.
+            // If the user inputs a slow gesture (s < 0.40) or a swipe moving slower than the fling,
+            // grab the viewport and stop the fling.
+            if !is_fast || instantaneous_speed < current_velocity * 0.5 {
+                queue.velocity = 0.0;
+                queue.fractional_step = 0.0;
+                queue.is_draining = false;
+            }
         }
 
         let (should_step_immediately, should_start_drain) = if is_test {
@@ -1590,22 +1601,35 @@ impl MouseHandler {
             let can_step_immediate = !queue.is_draining
                 && now.duration_since(queue.last_step_time) >= scroll_frame_interval;
 
+            let is_flick = is_fast && tab.scroll_acceleration_factor > 1.0;
+
             let (step_now, impulse_for_queue) = if is_flick {
-                let flick_strength = (instantaneous_speed - 0.35).max(0.0) * accel_multiplier;
-                let fling_impulse = (flick_strength * 2.8 + (lines as f32) * 0.5).min(20.0);
+                // If the viewport is already flinging in the same direction, check if gesture is accelerating:
+                let boost = if current_velocity > 0.5 {
+                    if gesture_is_accelerating || instantaneous_speed > current_velocity {
+                        let diff = (instantaneous_speed - current_velocity).max(0.0);
+                        (diff * 1.2 + (lines as f32) * 0.4).min(4.0) * accel_multiplier
+                    } else {
+                        0.2 * accel_multiplier
+                    }
+                } else {
+                    // Initial flick from rest: proportional to flick speed, capped per event
+                    let flick_strength = (instantaneous_speed - 0.40).max(0.0) * accel_multiplier;
+                    (flick_strength * 1.8 + (lines as f32) * 0.3).min(5.0)
+                };
 
                 if can_step_immediate {
-                    (true, fling_impulse)
+                    (true, boost)
                 } else {
-                    (false, fling_impulse + (lines as f32) * 0.5)
+                    (false, boost + (lines as f32) * 0.2)
                 }
             } else {
                 (true, 0.0)
             };
 
-            // Add velocity (positive for UP). Continuous flicks accelerate naturally.
+            // Add velocity with a maximum ceiling (22.0 lines/frame ≈ 1500 lines/sec) to prevent runaway fling
             if impulse_for_queue > 0.0 {
-                queue.velocity = (queue.velocity.max(0.0) + impulse_for_queue).min(60.0);
+                queue.velocity = (queue.velocity.max(0.0) + impulse_for_queue).min(22.0);
             }
 
             if step_now {
@@ -1689,7 +1713,8 @@ impl MouseHandler {
         let dt = now.duration_since(queue.last_event_time).as_millis();
         queue.last_event_time = now;
 
-        // 1. If moving in opposing direction (was flinging up: velocity > 0.0),
+        // 1. Opposing direction check:
+        //    If moving in opposing direction (was flinging up: velocity > 0.0),
         //    stop immediately.
         let was_opposing = queue.velocity > 0.01;
         if was_opposing {
@@ -1698,18 +1723,24 @@ impl MouseHandler {
             queue.is_draining = false;
         }
 
-        // 2. Gesture flickiness / timing:
+        // 2. Gesture flickiness / timing & acceleration:
         //    Normalized speed in lines per 14ms frame:
         let instantaneous_speed = (lines as f32 * 14.0) / (dt.max(4) as f32);
-        let is_flick =
-            dt < 65 && instantaneous_speed >= 0.35 && tab.scroll_acceleration_factor > 1.0;
+        let prev_speed = queue.prev_instantaneous_speed;
+        queue.prev_instantaneous_speed = instantaneous_speed;
 
-        // 3. When applying more swipes in the same direction, a slow swipe resets the fling
-        //    (grabbing the viewport and sliding it directly).
-        if !is_flick && queue.is_draining {
-            queue.velocity = 0.0;
-            queue.fractional_step = 0.0;
-            queue.is_draining = false;
+        let gesture_is_accelerating = instantaneous_speed > prev_speed + 0.1;
+        let is_fast = dt < 70 && instantaneous_speed >= 0.45;
+
+        let current_velocity = (-queue.velocity).max(0.0);
+
+        // 3. Grab vs Fling/Accelerate detection:
+        if queue.is_draining && !was_opposing {
+            if !is_fast || instantaneous_speed < current_velocity * 0.5 {
+                queue.velocity = 0.0;
+                queue.fractional_step = 0.0;
+                queue.is_draining = false;
+            }
         }
 
         let (should_step_immediately, should_start_drain) = if is_test {
@@ -1718,22 +1749,33 @@ impl MouseHandler {
             let can_step_immediate = !queue.is_draining
                 && now.duration_since(queue.last_step_time) >= scroll_frame_interval;
 
+            let is_flick = is_fast && tab.scroll_acceleration_factor > 1.0;
+
             let (step_now, impulse_for_queue) = if is_flick {
-                let flick_strength = (instantaneous_speed - 0.35).max(0.0) * accel_multiplier;
-                let fling_impulse = (flick_strength * 2.8 + (lines as f32) * 0.5).min(20.0);
+                let boost = if current_velocity > 0.5 {
+                    if gesture_is_accelerating || instantaneous_speed > current_velocity {
+                        let diff = (instantaneous_speed - current_velocity).max(0.0);
+                        (diff * 1.2 + (lines as f32) * 0.4).min(4.0) * accel_multiplier
+                    } else {
+                        0.2 * accel_multiplier
+                    }
+                } else {
+                    let flick_strength = (instantaneous_speed - 0.40).max(0.0) * accel_multiplier;
+                    (flick_strength * 1.8 + (lines as f32) * 0.3).min(5.0)
+                };
 
                 if can_step_immediate {
-                    (true, fling_impulse)
+                    (true, boost)
                 } else {
-                    (false, fling_impulse + (lines as f32) * 0.5)
+                    (false, boost + (lines as f32) * 0.2)
                 }
             } else {
                 (true, 0.0)
             };
 
-            // Add velocity (negative for DOWN). Continuous flicks accelerate naturally.
+            // Add velocity (negative for DOWN) with a ceiling to prevent runaway fling
             if impulse_for_queue > 0.0 {
-                queue.velocity = (queue.velocity.min(0.0) - impulse_for_queue).max(-60.0);
+                queue.velocity = (queue.velocity.min(0.0) - impulse_for_queue).max(-22.0);
             }
 
             if step_now {

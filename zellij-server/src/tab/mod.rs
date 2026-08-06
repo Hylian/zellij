@@ -160,6 +160,7 @@ pub struct SmoothScrollQueue {
     pub last_position: Position,
     pub last_step_time: Instant,
     pub last_event_time: Instant,
+    pub prev_instantaneous_speed: f32,
     pub is_draining: bool,
 }
 
@@ -172,6 +173,7 @@ impl Default for SmoothScrollQueue {
             last_position: Position::new(0, 0),
             last_step_time: past,
             last_event_time: past,
+            prev_instantaneous_speed: 0.0,
             is_draining: false,
         }
     }
