@@ -153,6 +153,25 @@ enum BufferedTabInstruction {
     HoldPane(PaneId, Option<i32>, bool, RunCommand), // Option<i32> is the exit status, bool is is_first_run
 }
 
+#[derive(Debug, Clone)]
+pub struct SmoothScrollQueue {
+    pub pending_steps: isize,
+    pub last_position: Position,
+    pub last_step_time: Instant,
+    pub is_draining: bool,
+}
+
+impl Default for SmoothScrollQueue {
+    fn default() -> Self {
+        Self {
+            pending_steps: 0,
+            last_position: Position::new(0, 0),
+            last_step_time: Instant::now() - std::time::Duration::from_secs(1),
+            is_draining: false,
+        }
+    }
+}
+
 pub(crate) struct Tab {
     pub id: usize,
     pub position: usize,
@@ -207,8 +226,7 @@ pub(crate) struct Tab {
     mouse_hover_pane_id: HashMap<ClientId, PaneId>,
     mouse_help_text_visible: HashMap<ClientId, bool>,
     last_mouse_activity_time: HashMap<ClientId, Instant>,
-    #[allow(dead_code)]
-    pub last_mouse_scroll_time: HashMap<ClientId, Instant>,
+    pub smooth_scroll_queues: HashMap<ClientId, SmoothScrollQueue>,
     current_pane_group: Rc<RefCell<PaneGroups>>,
     advanced_mouse_actions: bool,
     mouse_hover_effects: bool,
@@ -861,7 +879,7 @@ impl Tab {
             mouse_hover_pane_id: HashMap::new(),
             mouse_help_text_visible: HashMap::new(),
             last_mouse_activity_time: HashMap::new(),
-            last_mouse_scroll_time: HashMap::new(),
+            smooth_scroll_queues: HashMap::new(),
             current_pane_group,
             currently_marking_pane_group,
             advanced_mouse_actions,
@@ -4652,17 +4670,46 @@ impl Tab {
         MouseHandler::handle_scrollwheel_down(self, point, lines, client_id)
     }
 
-    pub fn step_smooth_scroll(
-        &mut self,
-        point: &Position,
-        direction: isize,
-        client_id: ClientId,
-    ) -> Result<MouseEffect> {
-        if direction > 0 {
-            MouseHandler::execute_scroll_step_up(self, point, client_id)
-        } else {
-            MouseHandler::execute_scroll_step_down(self, point, client_id)
+    pub fn drain_smooth_scroll_step(&mut self, client_id: ClientId) -> Result<MouseEffect> {
+        let (step_to_execute, position, has_more) = {
+            if let Some(queue) = self.smooth_scroll_queues.get_mut(&client_id) {
+                queue.last_step_time = Instant::now();
+                if queue.pending_steps > 0 {
+                    queue.pending_steps -= 1;
+                    let has_more = queue.pending_steps > 0;
+                    if !has_more {
+                        queue.is_draining = false;
+                    }
+                    (Some(1), queue.last_position, has_more)
+                } else if queue.pending_steps < 0 {
+                    queue.pending_steps += 1;
+                    let has_more = queue.pending_steps < 0;
+                    if !has_more {
+                        queue.is_draining = false;
+                    }
+                    (Some(-1), queue.last_position, has_more)
+                } else {
+                    queue.is_draining = false;
+                    (None, queue.last_position, false)
+                }
+            } else {
+                (None, Position::new(0, 0), false)
+            }
+        };
+
+        let effect = match step_to_execute {
+            Some(1) => MouseHandler::execute_scroll_step_up(self, &position, client_id)?,
+            Some(-1) => MouseHandler::execute_scroll_step_down(self, &position, client_id)?,
+            _ => MouseEffect::default(),
+        };
+
+        if has_more {
+            let _ = self
+                .senders
+                .send_to_background_jobs(BackgroundJob::DrainSmoothScrollQueue { client_id });
         }
+
+        Ok(effect)
     }
 
     fn get_pane_id_at(

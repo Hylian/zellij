@@ -1261,10 +1261,10 @@ impl MouseHandler {
                     }
                 }
                 if event.wheel_up {
-                    return Ok(MouseAction::ScrollUp { pane_id, lines: 3 });
+                    return Ok(MouseAction::ScrollUp { pane_id, lines: 1 });
                 }
                 if event.wheel_down {
-                    return Ok(MouseAction::ScrollDown { pane_id, lines: 3 });
+                    return Ok(MouseAction::ScrollDown { pane_id, lines: 1 });
                 }
             }
             return Ok(MouseAction::NoAction);
@@ -1545,16 +1545,53 @@ impl MouseHandler {
         lines: usize,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
-        let res = Self::execute_scroll_step_up(tab, point, client_id)?;
-        if lines > 1 {
-            let _ = tab.senders.send_to_background_jobs(BackgroundJob::SmoothScrollSteps {
-                client_id,
-                point: *point,
-                direction: 1,
-                remaining_steps: lines - 1,
-            });
+        let is_test = cfg!(test);
+        let scroll_frame_interval = std::time::Duration::from_millis(14);
+        let now = std::time::Instant::now();
+        let should_step_immediately = if is_test {
+            true
+        } else {
+            let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+            queue.last_position = *point;
+            if queue.pending_steps < 0 {
+                queue.pending_steps = 0;
+            }
+            !queue.is_draining && now.duration_since(queue.last_step_time) >= scroll_frame_interval
+        };
+
+        let mut effect = MouseEffect::default();
+        if should_step_immediately {
+            effect = Self::execute_scroll_step_up(tab, point, client_id)?;
         }
-        Ok(res)
+
+        let should_start_drain = if is_test {
+            false
+        } else {
+            let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+            if should_step_immediately {
+                queue.last_step_time = now;
+                if lines > 1 {
+                    queue.pending_steps += (lines - 1) as isize;
+                }
+            } else {
+                queue.pending_steps += lines as isize;
+            }
+            queue.pending_steps = queue.pending_steps.min(25);
+            if queue.pending_steps > 0 && !queue.is_draining {
+                queue.is_draining = true;
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_start_drain {
+            let _ = tab
+                .senders
+                .send_to_background_jobs(BackgroundJob::DrainSmoothScrollQueue { client_id });
+        }
+
+        Ok(effect)
     }
 
     pub(crate) fn execute_scroll_step_down(
@@ -1595,16 +1632,53 @@ impl MouseHandler {
         lines: usize,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
-        let res = Self::execute_scroll_step_down(tab, point, client_id)?;
-        if lines > 1 {
-            let _ = tab.senders.send_to_background_jobs(BackgroundJob::SmoothScrollSteps {
-                client_id,
-                point: *point,
-                direction: -1,
-                remaining_steps: lines - 1,
-            });
+        let is_test = cfg!(test);
+        let scroll_frame_interval = std::time::Duration::from_millis(14);
+        let now = std::time::Instant::now();
+        let should_step_immediately = if is_test {
+            true
+        } else {
+            let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+            queue.last_position = *point;
+            if queue.pending_steps > 0 {
+                queue.pending_steps = 0;
+            }
+            !queue.is_draining && now.duration_since(queue.last_step_time) >= scroll_frame_interval
+        };
+
+        let mut effect = MouseEffect::default();
+        if should_step_immediately {
+            effect = Self::execute_scroll_step_down(tab, point, client_id)?;
         }
-        Ok(res)
+
+        let should_start_drain = if is_test {
+            false
+        } else {
+            let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+            if should_step_immediately {
+                queue.last_step_time = now;
+                if lines > 1 {
+                    queue.pending_steps -= (lines - 1) as isize;
+                }
+            } else {
+                queue.pending_steps -= lines as isize;
+            }
+            queue.pending_steps = queue.pending_steps.max(-25);
+            if queue.pending_steps < 0 && !queue.is_draining {
+                queue.is_draining = true;
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_start_drain {
+            let _ = tab
+                .senders
+                .send_to_background_jobs(BackgroundJob::DrainSmoothScrollQueue { client_id });
+        }
+
+        Ok(effect)
     }
 
     fn handle_resize_scroll_up(

@@ -417,7 +417,7 @@ pub enum ScreenInstruction {
     ScrollUpAt(Position, ClientId, Option<NotificationEnd>),
     ScrollDown(ClientId, Option<NotificationEnd>),
     ScrollDownAt(Position, ClientId, Option<NotificationEnd>),
-    SmoothScrollStep(ClientId, Position, isize),
+    DrainSmoothScrollQueue(ClientId),
     ScrollToBottom(ClientId, Option<NotificationEnd>),
     ScrollToTop(ClientId, Option<NotificationEnd>),
     PageScrollUp(ClientId, Option<NotificationEnd>),
@@ -1009,7 +1009,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ToggleActiveSyncTab(..) => ScreenContext::ToggleActiveSyncTab,
             ScreenInstruction::ScrollUpAt(..) => ScreenContext::ScrollUpAt,
             ScreenInstruction::ScrollDownAt(..) => ScreenContext::ScrollDownAt,
-            ScreenInstruction::SmoothScrollStep(..) => ScreenContext::SmoothScrollStep,
+            ScreenInstruction::DrainSmoothScrollQueue(..) => ScreenContext::DrainSmoothScrollQueue,
             ScreenInstruction::MouseEvent(..) => ScreenContext::MouseEvent,
             ScreenInstruction::Copy(..) => ScreenContext::Copy,
             ScreenInstruction::ToggleTab(..) => ScreenContext::ToggleTab,
@@ -6675,12 +6675,12 @@ pub(crate) fn screen_thread_main(
                 );
                 screen.render(None)?;
             },
-            ScreenInstruction::SmoothScrollStep(client_id, point, direction) => {
+            ScreenInstruction::DrainSmoothScrollQueue(client_id) => {
                 active_tab_and_connected_client_id!(
                     screen,
                     client_id,
                     |tab: &mut Tab, client_id: ClientId| tab
-                        .step_smooth_scroll(&point, direction, client_id), ?
+                        .drain_smooth_scroll_step(client_id), ?
                 );
                 screen.render(None)?;
             },

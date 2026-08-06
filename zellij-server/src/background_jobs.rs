@@ -30,7 +30,6 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use zellij_utils::consts::is_ipc_socket;
-use zellij_utils::position::Position;
 
 use crate::panes::PaneId;
 use crate::plugins::{PluginId, PluginInstruction};
@@ -67,11 +66,8 @@ pub enum BackgroundJob {
     ),
     HighlightPanesWithMessage(Vec<PaneId>, String),
     RenderToClients,
-    SmoothScrollSteps {
+    DrainSmoothScrollQueue {
         client_id: ClientId,
-        point: Position,
-        direction: isize,
-        remaining_steps: usize,
     },
     QueryZellijWebServerStatus,
     ClearHelpText {
@@ -98,7 +94,9 @@ impl From<&BackgroundJob> for BackgroundJobContext {
             BackgroundJob::WebRequest(..) => BackgroundJobContext::WebRequest,
             BackgroundJob::ReportPluginList(..) => BackgroundJobContext::ReportPluginList,
             BackgroundJob::RenderToClients => BackgroundJobContext::ReportPluginList,
-            BackgroundJob::SmoothScrollSteps { .. } => BackgroundJobContext::SmoothScrollSteps,
+            BackgroundJob::DrainSmoothScrollQueue { .. } => {
+                BackgroundJobContext::DrainSmoothScrollQueue
+            },
             BackgroundJob::HighlightPanesWithMessage(..) => {
                 BackgroundJobContext::HighlightPanesWithMessage
             },
@@ -494,21 +492,14 @@ pub(crate) fn background_jobs_main(
                     });
                 }
             },
-            BackgroundJob::SmoothScrollSteps {
-                client_id,
-                point,
-                direction,
-                remaining_steps,
-            } => {
+            BackgroundJob::DrainSmoothScrollQueue { client_id } => {
                 runtime.spawn({
                     let senders = bus.senders.clone();
                     async move {
-                        for _ in 0..remaining_steps {
-                            tokio::time::sleep(std::time::Duration::from_millis(14)).await;
-                            let _ = senders.send_to_screen(ScreenInstruction::SmoothScrollStep(
-                                client_id, point, direction,
-                            ));
-                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(14)).await;
+                        let _ = senders.send_to_screen(ScreenInstruction::DrainSmoothScrollQueue(
+                            client_id,
+                        ));
                     }
                 });
             },
