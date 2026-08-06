@@ -11526,7 +11526,7 @@ fn test_smooth_scroll_momentum_friction_drain() {
 }
 
 #[test]
-fn test_opposing_scroll_stops_fling_and_resets_acceleration() {
+fn test_opposing_scroll_stops_fling() {
     let size = Size {
         cols: 121,
         rows: 20,
@@ -11538,12 +11538,11 @@ fn test_opposing_scroll_stops_fling_and_resets_acceleration() {
     {
         let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
         queue.velocity = 10.0;
-        queue.acceleration_factor = 3.5;
         queue.is_draining = true;
         queue.last_event_time = std::time::Instant::now();
     }
 
-    // 2. An opposing scroll down should stop the fling immediately and reset acceleration
+    // 2. An opposing scroll down should stop the fling immediately
     tab.handle_mouse_event(
         &MouseEvent::new_scroll_down_event(Position::new(10, 60)),
         client_id,
@@ -11551,11 +11550,12 @@ fn test_opposing_scroll_stops_fling_and_resets_acceleration() {
     .unwrap();
 
     let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
-    assert_eq!(queue.acceleration_factor, 1.0);
+    assert_eq!(queue.velocity, 0.0);
+    assert!(!queue.is_draining);
 }
 
 #[test]
-fn test_scroll_after_300ms_stops_fling_and_resets_acceleration() {
+fn test_slow_swipe_resets_fling_and_grabs_viewport() {
     let size = Size {
         cols: 121,
         rows: 20,
@@ -11563,17 +11563,16 @@ fn test_scroll_after_300ms_stops_fling_and_resets_acceleration() {
     let client_id = 1;
     let mut tab = create_new_tab(size, ModeInfo::default());
 
-    // 1. Set up an active fling from 400ms ago
+    // 1. Set up an active fling in progress from 100ms ago
     {
         let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
         queue.velocity = 8.0;
-        queue.acceleration_factor = 3.2;
         queue.is_draining = true;
         queue.last_event_time =
-            std::time::Instant::now() - std::time::Duration::from_millis(400);
+            std::time::Instant::now() - std::time::Duration::from_millis(100);
     }
 
-    // 2. New scroll after >300ms should reset acceleration and cancel prior fling
+    // 2. A slow swipe in the same direction (dt >= 65ms) grabs viewport and halts fling
     tab.handle_mouse_event(
         &MouseEvent::new_scroll_up_event(Position::new(10, 60)),
         client_id,
@@ -11581,7 +11580,8 @@ fn test_scroll_after_300ms_stops_fling_and_resets_acceleration() {
     .unwrap();
 
     let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
-    assert_eq!(queue.acceleration_factor, 1.0);
+    assert_eq!(queue.velocity, 0.0);
+    assert!(!queue.is_draining);
 }
 
 #[test]
