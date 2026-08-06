@@ -6643,7 +6643,7 @@ pub(crate) fn screen_thread_main(
                     screen,
                     client_id,
                     |tab: &mut Tab, client_id: ClientId| tab
-                        .handle_scrollwheel_up(&point, 3, client_id), ?
+                        .handle_scrollwheel_up(&point, 1, client_id), ?
                 );
                 screen.render(None)?;
             },
@@ -6669,7 +6669,7 @@ pub(crate) fn screen_thread_main(
                     screen,
                     client_id,
                     |tab: &mut Tab, client_id: ClientId| tab
-                        .handle_scrollwheel_down(&point, 3, client_id), ?
+                        .handle_scrollwheel_down(&point, 1, client_id), ?
                 );
                 screen.render(None)?;
             },
