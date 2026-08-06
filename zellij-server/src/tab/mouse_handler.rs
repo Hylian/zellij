@@ -1261,10 +1261,10 @@ impl MouseHandler {
                     }
                 }
                 if event.wheel_up {
-                    return Ok(MouseAction::ScrollUp { pane_id, lines: 3 });
+                    return Ok(MouseAction::ScrollUp { pane_id, lines: 1 });
                 }
                 if event.wheel_down {
-                    return Ok(MouseAction::ScrollDown { pane_id, lines: 3 });
+                    return Ok(MouseAction::ScrollDown { pane_id, lines: 1 });
                 }
             }
             return Ok(MouseAction::NoAction);
