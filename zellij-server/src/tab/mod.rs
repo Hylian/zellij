@@ -4682,8 +4682,8 @@ impl Tab {
 
     pub fn drain_smooth_scroll_step(&mut self, client_id: ClientId) -> Result<MouseEffect> {
         let now = Instant::now();
-        const FRICTION: f32 = 0.92;
-        const MIN_VELOCITY: f32 = 0.12;
+        const FRICTION: f32 = 0.955;
+        const MIN_VELOCITY: f32 = 0.08;
 
         let (step_to_execute, position, has_more) = {
             if let Some(queue) = self.smooth_scroll_queues.get_mut(&client_id) {
