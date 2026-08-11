@@ -157,6 +157,8 @@ enum BufferedTabInstruction {
 pub struct SmoothScrollQueue {
     pub velocity: f32,
     pub fractional_step: f32,
+    pub pending_lines: usize,
+    pub scroll_direction: i8,
     pub last_position: Position,
     pub last_step_time: Instant,
     pub last_event_time: Instant,
@@ -170,6 +172,8 @@ impl Default for SmoothScrollQueue {
         Self {
             velocity: 0.0,
             fractional_step: 0.0,
+            pending_lines: 0,
+            scroll_direction: 0,
             last_position: Position::new(0, 0),
             last_step_time: past,
             last_event_time: past,
@@ -4691,33 +4695,39 @@ impl Tab {
         let (step_to_execute, position, has_more) = {
             if let Some(queue) = self.smooth_scroll_queues.get_mut(&client_id) {
                 queue.last_step_time = now;
-                let vel = queue.velocity;
-                let abs_vel = vel.abs();
 
-                if abs_vel >= MIN_VELOCITY {
-                    let dir = if vel > 0.0 { 1 } else { -1 };
-                    queue.fractional_step += abs_vel;
-                    let lines = queue.fractional_step.floor() as usize;
-                    queue.fractional_step -= lines as f32;
-
-                    // Apply friction decay per frame
+                if queue.pending_lines > 0 {
+                    let dir = queue.scroll_direction;
+                    queue.pending_lines -= 1;
+                    let has_more = queue.pending_lines > 0
+                        || (self.scroll_inertia && queue.velocity.abs() >= MIN_VELOCITY);
+                    if !has_more {
+                        queue.is_draining = false;
+                    }
+                    (Some(dir), queue.last_position, has_more)
+                } else if self.scroll_inertia && queue.velocity.abs() >= MIN_VELOCITY {
+                    let dir = if queue.velocity > 0.0 { 1 } else { -1 };
+                    queue.fractional_step += queue.velocity.abs();
                     queue.velocity *= FRICTION;
 
-                    let has_more = queue.velocity.abs() >= MIN_VELOCITY;
+                    let step = if queue.fractional_step >= 1.0 {
+                        queue.fractional_step -= 1.0;
+                        Some(dir)
+                    } else {
+                        None
+                    };
+
+                    let has_more = queue.velocity.abs() >= MIN_VELOCITY || queue.pending_lines > 0;
                     if !has_more {
                         queue.velocity = 0.0;
                         queue.fractional_step = 0.0;
                         queue.is_draining = false;
                     }
-
-                    if lines > 0 {
-                        (Some((dir, lines)), queue.last_position, has_more)
-                    } else {
-                        (None, queue.last_position, has_more)
-                    }
+                    (step, queue.last_position, has_more)
                 } else {
                     queue.velocity = 0.0;
                     queue.fractional_step = 0.0;
+                    queue.pending_lines = 0;
                     queue.is_draining = false;
                     (None, queue.last_position, false)
                 }
@@ -4727,11 +4737,11 @@ impl Tab {
         };
 
         let effect = match step_to_execute {
-            Some((1, count)) => {
-                MouseHandler::execute_scroll_step_up(self, &position, count, client_id)?
+            Some(1) => {
+                MouseHandler::execute_scroll_step_up(self, &position, 1, client_id)?
             },
-            Some((-1, count)) => {
-                MouseHandler::execute_scroll_step_down(self, &position, count, client_id)?
+            Some(-1) => {
+                MouseHandler::execute_scroll_step_down(self, &position, 1, client_id)?
             },
             _ => MouseEffect::default(),
         };

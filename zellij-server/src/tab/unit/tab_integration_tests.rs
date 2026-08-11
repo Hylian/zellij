@@ -11533,6 +11533,51 @@ fn test_smooth_scroll_momentum_friction_drain() {
 }
 
 #[test]
+fn test_multi_line_scroll_animates_one_line_at_a_time() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.update_scroll_inertia(false);
+
+    let mut content = String::new();
+    for i in 0..100 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    // Set up 3 pending lines in queue
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.pending_lines = 3;
+        queue.scroll_direction = 1;
+        queue.is_draining = true;
+        queue.last_position = Position::new(10, 60);
+    }
+
+    // First frame drains 1 line, leaving 2
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 2);
+    assert!(queue.is_draining);
+
+    // Second frame drains 1 line, leaving 1
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 1);
+    assert!(queue.is_draining);
+
+    // Third frame drains last line, leaving 0 and stopping drain
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 0);
+    assert!(!queue.is_draining);
+}
+
+#[test]
 fn test_scroll_inertia_disabled_no_momentum_drain() {
     let size = Size {
         cols: 121,
