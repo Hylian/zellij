@@ -743,6 +743,7 @@ pub enum ScreenInstruction {
         focus_follows_mouse: bool,
         mouse_click_through: bool,
         scroll_acceleration_factor: f32,
+        scroll_inertia: bool,
     },
     RerunCommandPane(u32, Option<NotificationEnd>), // u32 - terminal pane id
     ResizePaneWithId(ResizeStrategy, PaneId),
@@ -1413,6 +1414,7 @@ pub(crate) struct Screen {
     focus_follows_mouse: bool,
     mouse_click_through: bool,
     scroll_acceleration_factor: f32,
+    scroll_inertia: bool,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
     // the below are the configured values - the ones that will be set if and when the web server
     // is brought online
@@ -1542,6 +1544,7 @@ impl Screen {
         focus_follows_mouse: bool,
         mouse_click_through: bool,
         scroll_acceleration_factor: f32,
+        scroll_inertia: bool,
         web_server_ip: IpAddr,
         web_server_port: u16,
     ) -> Self {
@@ -1600,6 +1603,7 @@ impl Screen {
             focus_follows_mouse,
             mouse_click_through,
             scroll_acceleration_factor,
+            scroll_inertia,
             web_server_ip,
             web_server_port,
             render_blocker: RenderBlocker::new(100),
@@ -2907,6 +2911,7 @@ impl Screen {
             self.focus_follows_mouse,
             self.mouse_click_through,
             self.scroll_acceleration_factor,
+            self.scroll_inertia,
             self.web_server_ip,
             self.web_server_port,
         );
@@ -4495,6 +4500,7 @@ impl Screen {
         focus_follows_mouse: bool,
         mouse_click_through: bool,
         scroll_acceleration_factor: f32,
+        scroll_inertia: bool,
         client_id: ClientId,
     ) -> Result<()> {
         let should_support_arrow_fonts = !simplified_ui;
@@ -4520,6 +4526,7 @@ impl Screen {
         self.focus_follows_mouse = focus_follows_mouse;
         self.mouse_click_through = mouse_click_through;
         self.scroll_acceleration_factor = scroll_acceleration_factor;
+        self.scroll_inertia = scroll_inertia;
         self.default_mode_info
             .update_arrow_fonts(should_support_arrow_fonts);
         self.default_mode_info
@@ -4544,6 +4551,7 @@ impl Screen {
             tab.update_focus_follows_mouse(focus_follows_mouse);
             tab.update_mouse_click_through(mouse_click_through);
             tab.update_scroll_acceleration_factor(scroll_acceleration_factor);
+            tab.update_scroll_inertia(scroll_inertia);
         }
 
         // Clear hover state when disabled
@@ -5660,6 +5668,7 @@ pub(crate) fn screen_thread_main(
     let focus_follows_mouse = config_options.focus_follows_mouse.unwrap_or(false);
     let mouse_click_through = config_options.mouse_click_through.unwrap_or(false);
     let scroll_acceleration_factor = config_options.scroll_acceleration_factor.unwrap_or(3.5);
+    let scroll_inertia = config_options.scroll_inertia.unwrap_or(true);
 
     let thread_senders = bus.senders.clone();
     let mut screen = Screen::new(
@@ -5702,6 +5711,7 @@ pub(crate) fn screen_thread_main(
         focus_follows_mouse,
         mouse_click_through,
         scroll_acceleration_factor,
+        scroll_inertia,
         web_server_ip,
         web_server_port,
     );
@@ -8757,6 +8767,7 @@ pub(crate) fn screen_thread_main(
                 focus_follows_mouse,
                 mouse_click_through,
                 scroll_acceleration_factor,
+                scroll_inertia,
             } => {
                 screen.host_theme_dark_styling = host_theme_dark;
                 screen.host_theme_light_styling = host_theme_light;
@@ -8782,6 +8793,7 @@ pub(crate) fn screen_thread_main(
                         focus_follows_mouse,
                         mouse_click_through,
                         scroll_acceleration_factor,
+                        scroll_inertia,
                         client_id,
                     )
                     .non_fatal();

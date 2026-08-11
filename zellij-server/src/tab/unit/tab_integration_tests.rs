@@ -276,6 +276,7 @@ fn create_new_tab(size: Size, default_mode: ModeInfo) -> Tab {
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -364,6 +365,7 @@ fn create_new_tab_without_pane_frames(size: Size, default_mode: ModeInfo) -> Tab
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -467,6 +469,7 @@ fn create_new_tab_with_swap_layouts(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -571,6 +574,7 @@ fn create_new_tab_with_os_api(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -661,6 +665,7 @@ fn create_new_tab_with_layout(size: Size, default_mode: ModeInfo, layout: &str) 
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -765,6 +770,7 @@ fn create_new_tab_with_mock_pty_writer(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -860,6 +866,7 @@ fn create_new_tab_with_sixel_support(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -11494,7 +11501,7 @@ fn test_smooth_scroll_momentum_friction_drain() {
     }
 
     // Step through the drain frames and verify velocity decays under friction to 0
-    for _ in 0..60 {
+    for _ in 0..200 {
         let prev_vel = tab
             .smooth_scroll_queues
             .get(&client_id)
@@ -11520,6 +11527,33 @@ fn test_smooth_scroll_momentum_friction_drain() {
     }
 
     // Queue should now be completely at rest
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.velocity, 0.0);
+    assert!(!queue.is_draining);
+}
+
+#[test]
+fn test_scroll_inertia_disabled_no_momentum_drain() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.update_scroll_inertia(false);
+    tab.update_scroll_acceleration_factor(3.5);
+
+    let mut content = String::new();
+    for i in 0..100 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    let point = Position::new(10, 60);
+    tab.handle_scrollwheel_up(&point, 1, client_id).unwrap();
+
+    // Verify that with inertia disabled, no background drain velocity is enqueued
     let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
     assert_eq!(queue.velocity, 0.0);
     assert!(!queue.is_draining);
@@ -12683,6 +12717,7 @@ fn create_new_tab_with_plugin_receiver(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -14468,6 +14503,7 @@ fn create_new_tab_with_server_receiver(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         8080,
     );

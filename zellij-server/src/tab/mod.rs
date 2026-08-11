@@ -240,6 +240,7 @@ pub(crate) struct Tab {
     focus_follows_mouse: bool,
     mouse_click_through: bool,
     pub scroll_acceleration_factor: f32,
+    pub scroll_inertia: bool,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
     connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     // the below are the configured values - the ones that will be set if and when the web server
@@ -785,6 +786,7 @@ impl Tab {
         focus_follows_mouse: bool,
         mouse_click_through: bool,
         scroll_acceleration_factor: f32,
+        scroll_inertia: bool,
         web_server_ip: IpAddr,
         web_server_port: u16,
     ) -> Self {
@@ -896,6 +898,7 @@ impl Tab {
             focus_follows_mouse,
             mouse_click_through,
             scroll_acceleration_factor,
+            scroll_inertia,
             connected_clients_in_app,
             web_server_ip,
             web_server_port,
@@ -5820,6 +5823,9 @@ impl Tab {
     }
     pub fn update_scroll_acceleration_factor(&mut self, factor: f32) {
         self.scroll_acceleration_factor = factor;
+    }
+    pub fn update_scroll_inertia(&mut self, scroll_inertia: bool) {
+        self.scroll_inertia = scroll_inertia;
     }
     pub fn clear_mouse_hover_state(&mut self) {
         self.mouse_hover_pane_id.clear();

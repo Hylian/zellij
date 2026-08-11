@@ -1951,6 +1951,8 @@ pub struct Options {
     pub theme_light: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(float, optional, tag="48")]
     pub scroll_acceleration_factor: ::core::option::Option<f32>,
+    #[prost(bool, optional, tag="49")]
+    pub scroll_inertia: ::core::option::Option<bool>,
 }
 /// Pane-targeting action messages
 #[allow(clippy::derive_partial_eq_without_eq)]

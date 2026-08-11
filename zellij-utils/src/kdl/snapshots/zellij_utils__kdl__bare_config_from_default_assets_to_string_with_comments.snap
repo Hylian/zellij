@@ -587,4 +587,9 @@ web_client {
 // Default: 3.5 (1.0 to disable acceleration)
 // 
 // scroll_acceleration_factor 3.5
+ 
+// Enable or disable inertial scrolling momentum after trackpad swipe
+// Default: true
+// 
+// scroll_inertia true
 

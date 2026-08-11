@@ -315,6 +315,7 @@ fn create_new_screen(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -5379,6 +5380,7 @@ fn create_new_screen_with_message_capture(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -8450,6 +8452,7 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -9034,6 +9037,7 @@ fn create_new_screen_with_theme_capture(size: Size) -> (Screen, ThemeCapture) {
         false,
         false,
         3.5, // scroll_acceleration_factor
+        true, // scroll_inertia
         web_server_ip,
         web_server_port,
     );

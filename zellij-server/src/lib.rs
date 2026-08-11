@@ -437,6 +437,10 @@ impl SessionMetaData {
                         .options
                         .scroll_acceleration_factor
                         .unwrap_or(3.5),
+                    scroll_inertia: new_config
+                        .options
+                        .scroll_inertia
+                        .unwrap_or(true),
                 })
                 .unwrap();
             self.senders

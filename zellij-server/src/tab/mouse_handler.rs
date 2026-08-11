@@ -1580,6 +1580,32 @@ impl MouseHandler {
         let gesture_is_accelerating = instantaneous_speed > prev_speed + 0.05;
         let is_flick = dt < 80 && instantaneous_speed >= 0.28 && tab.scroll_acceleration_factor > 1.0;
 
+        if !tab.scroll_inertia && !is_test {
+            let was_opposing = queue.velocity < -0.01;
+            if was_opposing || queue.is_draining {
+                queue.velocity = 0.0;
+                queue.fractional_step = 0.0;
+                queue.is_draining = false;
+            }
+            if dt >= 200 {
+                queue.fractional_step = 0.0;
+            }
+            let lines_to_step = if tab.scroll_acceleration_factor > 1.0 {
+                let speed_scale =
+                    (instantaneous_speed / 0.25).clamp(1.0, tab.scroll_acceleration_factor);
+                (lines as f32 * speed_scale) + queue.fractional_step
+            } else {
+                (lines as f32) + queue.fractional_step
+            };
+            let int_lines = lines_to_step.floor() as usize;
+            queue.fractional_step = lines_to_step - int_lines as f32;
+            let mut effect = MouseEffect::default();
+            if int_lines > 0 {
+                effect = Self::execute_scroll_step_up(tab, point, int_lines, client_id)?;
+            }
+            return Ok(effect);
+        }
+
         let current_velocity = queue.velocity.max(0.0);
 
         // 3. Grab vs Fling/Accelerate detection:
@@ -1723,6 +1749,32 @@ impl MouseHandler {
 
         let gesture_is_accelerating = instantaneous_speed > prev_speed + 0.05;
         let is_flick = dt < 80 && instantaneous_speed >= 0.28 && tab.scroll_acceleration_factor > 1.0;
+
+        if !tab.scroll_inertia && !is_test {
+            let was_opposing = queue.velocity > 0.01;
+            if was_opposing || queue.is_draining {
+                queue.velocity = 0.0;
+                queue.fractional_step = 0.0;
+                queue.is_draining = false;
+            }
+            if dt >= 200 {
+                queue.fractional_step = 0.0;
+            }
+            let lines_to_step = if tab.scroll_acceleration_factor > 1.0 {
+                let speed_scale =
+                    (instantaneous_speed / 0.25).clamp(1.0, tab.scroll_acceleration_factor);
+                (lines as f32 * speed_scale) + queue.fractional_step
+            } else {
+                (lines as f32) + queue.fractional_step
+            };
+            let int_lines = lines_to_step.floor() as usize;
+            queue.fractional_step = lines_to_step - int_lines as f32;
+            let mut effect = MouseEffect::default();
+            if int_lines > 0 {
+                effect = Self::execute_scroll_step_down(tab, point, int_lines, client_id)?;
+            }
+            return Ok(effect);
+        }
 
         let current_velocity = (-queue.velocity).max(0.0);
 

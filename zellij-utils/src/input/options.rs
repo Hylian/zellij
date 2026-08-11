@@ -276,6 +276,11 @@ pub struct Options {
     #[serde(default)]
     pub scroll_acceleration_factor: Option<f32>,
 
+    /// Enable or disable inertial scrolling momentum after trackpad swipe (default is true)
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub scroll_inertia: Option<bool>,
+
     /// Number of async worker tasks to spawn per active client.
     ///
     /// Allocating few tasks may result in resource contention and lags. Small values (around 4)
@@ -392,6 +397,7 @@ impl Options {
         let scroll_acceleration_factor = other
             .scroll_acceleration_factor
             .or(self.scroll_acceleration_factor);
+        let scroll_inertia = other.scroll_inertia.or(self.scroll_inertia);
 
         Options {
             simplified_ui,
@@ -441,6 +447,7 @@ impl Options {
             enforce_https_for_localhost,
             post_command_discovery_hook,
             scroll_acceleration_factor,
+            scroll_inertia,
             client_async_worker_tasks,
         }
     }
@@ -531,6 +538,7 @@ impl Options {
         let scroll_acceleration_factor = other
             .scroll_acceleration_factor
             .or(self.scroll_acceleration_factor);
+        let scroll_inertia = merge_bool(other.scroll_inertia, self.scroll_inertia);
 
         Options {
             simplified_ui,
@@ -580,6 +588,7 @@ impl Options {
             enforce_https_for_localhost,
             post_command_discovery_hook,
             scroll_acceleration_factor,
+            scroll_inertia,
             client_async_worker_tasks,
         }
     }

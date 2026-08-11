@@ -2875,6 +2875,8 @@ impl Options {
             "acceleration_factor"
         )
         .map(|(v, _)| v as f32);
+        let scroll_inertia =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "scroll_inertia").map(|(v, _)| v);
 
         Ok(Options {
             simplified_ui,
@@ -2924,6 +2926,7 @@ impl Options {
             enforce_https_for_localhost,
             post_command_discovery_hook,
             scroll_acceleration_factor,
+            scroll_inertia,
             client_async_worker_tasks,
         })
     }
@@ -4453,6 +4456,9 @@ impl Options {
         {
             nodes.push(scroll_acceleration_factor);
         }
+        if let Some(scroll_inertia) = self.scroll_inertia_to_kdl(add_comments) {
+            nodes.push(scroll_inertia);
+        }
         nodes
     }
     fn scroll_acceleration_factor_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
@@ -4477,6 +4483,34 @@ impl Options {
             Some(node)
         } else if add_comments {
             let mut node = create_node(3.5);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn scroll_inertia_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}",
+            " ",
+            "// Enable or disable inertial scrolling momentum after trackpad swipe",
+            "// Default: true",
+            "// ",
+        );
+
+        let create_node = |val: bool| -> KdlNode {
+            let mut node = KdlNode::new("scroll_inertia");
+            node.push(KdlValue::Bool(val));
+            node
+        };
+        if let Some(scroll_inertia) = self.scroll_inertia {
+            let mut node = create_node(scroll_inertia);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(true);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {

@@ -216,6 +216,7 @@ fn create_new_tab(size: Size, stacked_resize: bool) -> Tab {
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -303,6 +304,7 @@ fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -396,6 +398,7 @@ fn create_new_tab_with_cell_size(
         false, // focus_follows_mouse
         false, // mouse_click_through
         3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );

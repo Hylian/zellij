@@ -6028,6 +6028,7 @@ Config {
         enforce_https_for_localhost: None,
         post_command_discovery_hook: None,
         scroll_acceleration_factor: None,
+        scroll_inertia: None,
         client_async_worker_tasks: None,
     },
     themes: {},
