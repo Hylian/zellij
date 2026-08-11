@@ -4698,21 +4698,49 @@ impl Tab {
 
                 if queue.pending_lines > 0 {
                     let dir = queue.scroll_direction;
-                    queue.pending_lines -= 1;
+                    // Dynamically step more lines when the queue is congested to prevent animation delay:
+                    // - 1-3 lines pending: 1 line per frame (butter smooth)
+                    // - 4-7 lines pending: 2 lines per frame
+                    // - 8-12 lines pending: 3 lines per frame
+                    // - 13-18 lines pending: 4 lines per frame
+                    // - 19+ lines pending: proportional (drains in ~3-4 frames max)
+                    let lines_to_drain = match queue.pending_lines {
+                        0..=3 => 1,
+                        4..=7 => 2,
+                        8..=12 => 3,
+                        13..=18 => 4,
+                        n => (n / 4).max(5),
+                    }
+                    .min(queue.pending_lines);
+
+                    queue.pending_lines -= lines_to_drain;
                     let has_more = queue.pending_lines > 0
                         || (self.scroll_inertia && queue.velocity.abs() >= MIN_VELOCITY);
                     if !has_more {
                         queue.is_draining = false;
                     }
-                    (Some(dir), queue.last_position, has_more)
+                    (Some((dir, lines_to_drain)), queue.last_position, has_more)
                 } else if self.scroll_inertia && queue.velocity.abs() >= MIN_VELOCITY {
                     let dir = if queue.velocity > 0.0 { 1 } else { -1 };
                     queue.fractional_step += queue.velocity.abs();
                     queue.velocity *= FRICTION;
 
                     let step = if queue.fractional_step >= 1.0 {
-                        queue.fractional_step -= 1.0;
-                        Some(dir)
+                        let int_lines = queue.fractional_step.floor() as usize;
+                        let lines_to_drain = match int_lines {
+                            0 => 0,
+                            1..=3 => 1,
+                            4..=7 => 2,
+                            8..=12 => 3,
+                            n => (n / 3).max(4),
+                        }
+                        .min(int_lines);
+                        queue.fractional_step -= lines_to_drain as f32;
+                        if lines_to_drain > 0 {
+                            Some((dir, lines_to_drain))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     };
@@ -4737,11 +4765,11 @@ impl Tab {
         };
 
         let effect = match step_to_execute {
-            Some(1) => {
-                MouseHandler::execute_scroll_step_up(self, &position, 1, client_id)?
+            Some((1, count)) => {
+                MouseHandler::execute_scroll_step_up(self, &position, count, client_id)?
             },
-            Some(-1) => {
-                MouseHandler::execute_scroll_step_down(self, &position, 1, client_id)?
+            Some((-1, count)) => {
+                MouseHandler::execute_scroll_step_down(self, &position, count, client_id)?
             },
             _ => MouseEffect::default(),
         };

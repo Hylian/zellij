@@ -11578,6 +11578,45 @@ fn test_multi_line_scroll_animates_one_line_at_a_time() {
 }
 
 #[test]
+fn test_congested_scroll_queue_steps_multiple_lines_to_prevent_delay() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.update_scroll_inertia(false);
+
+    let mut content = String::new();
+    for i in 0..100 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    // Set up a large backlog (10 pending lines) in queue
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.pending_lines = 10;
+        queue.scroll_direction = 1;
+        queue.is_draining = true;
+        queue.last_position = Position::new(10, 60);
+    }
+
+    // When pending_lines is 10 (8..=12), it drains 3 lines in a single frame to clear backlog
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 7); // 10 - 3 = 7
+    assert!(queue.is_draining);
+
+    // When pending_lines is 7 (4..=7), it drains 2 lines in the next frame
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 5); // 7 - 2 = 5
+    assert!(queue.is_draining);
+}
+
+#[test]
 fn test_scroll_inertia_disabled_no_momentum_drain() {
     let size = Size {
         cols: 121,

@@ -1602,11 +1602,22 @@ impl MouseHandler {
             return Self::execute_scroll_step_up(tab, point, lines, client_id);
         }
 
-        // 4. Animate 1 line at a time:
-        //    Buffer extra lines beyond the immediate 1st line into pending_lines.
-        let should_step_immediate = int_lines > 0;
-        if int_lines > 1 {
-            queue.pending_lines += int_lines - 1;
+        // 4. Animate / step lines:
+        //    For small queues (pending_lines <= 2), step 1 line immediately.
+        //    When the queue is congested, scale immediate steps to prevent animation backlog.
+        let immediate_lines = if int_lines == 0 {
+            0
+        } else {
+            match queue.pending_lines {
+                0..=2 => 1,
+                3..=6 => 2,
+                _ => 3,
+            }
+            .min(int_lines)
+        };
+        let to_buffer = int_lines.saturating_sub(immediate_lines);
+        if to_buffer > 0 {
+            queue.pending_lines += to_buffer;
         }
 
         // 5. Inertia fling handling (only when scroll_inertia is true)
@@ -1645,8 +1656,8 @@ impl MouseHandler {
         }
 
         let mut effect = MouseEffect::default();
-        if should_step_immediate {
-            effect = Self::execute_scroll_step_up(tab, point, 1, client_id)?;
+        if immediate_lines > 0 {
+            effect = Self::execute_scroll_step_up(tab, point, immediate_lines, client_id)?;
         }
 
         if should_start_drain {
@@ -1753,11 +1764,22 @@ impl MouseHandler {
             return Self::execute_scroll_step_down(tab, point, lines, client_id);
         }
 
-        // 4. Animate 1 line at a time:
-        //    Buffer extra lines beyond the immediate 1st line into pending_lines.
-        let should_step_immediate = int_lines > 0;
-        if int_lines > 1 {
-            queue.pending_lines += int_lines - 1;
+        // 4. Animate / step lines:
+        //    For small queues (pending_lines <= 2), step 1 line immediately.
+        //    When the queue is congested, scale immediate steps to prevent animation backlog.
+        let immediate_lines = if int_lines == 0 {
+            0
+        } else {
+            match queue.pending_lines {
+                0..=2 => 1,
+                3..=6 => 2,
+                _ => 3,
+            }
+            .min(int_lines)
+        };
+        let to_buffer = int_lines.saturating_sub(immediate_lines);
+        if to_buffer > 0 {
+            queue.pending_lines += to_buffer;
         }
 
         // 5. Inertia fling handling (only when scroll_inertia is true)
@@ -1796,8 +1818,8 @@ impl MouseHandler {
         }
 
         let mut effect = MouseEffect::default();
-        if should_step_immediate {
-            effect = Self::execute_scroll_step_down(tab, point, 1, client_id)?;
+        if immediate_lines > 0 {
+            effect = Self::execute_scroll_step_down(tab, point, immediate_lines, client_id)?;
         }
 
         if should_start_drain {
