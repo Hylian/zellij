@@ -6129,4 +6129,37 @@ fn csi_j_parameterless_clears_below_cursor() {
     assert_eq!(vp[2], "");
 }
 
+#[test]
+fn decstbm_scroll_region_line_wrap_preserves_scrollback_and_pinned_rows() {
+    let mut grid = create_grid_with_size_and_raw(6, 10, &[]);
+
+    // Set scroll region to rows 1..4 (0-indexed 0..3), leaving rows 4 and 5 pinned below
+    feed_bytes(&mut grid, b"\x1b[1;4r");
+    feed_bytes(&mut grid, b"\x1b[5;1H[PINNED 1]");
+    feed_bytes(&mut grid, b"\x1b[6;1H[PINNED 2]");
+
+    // Fill initial lines inside scroll region
+    feed_bytes(&mut grid, b"\x1b[1;1Hrow 1\x1b[2;1Hrow 2\x1b[3;1Hrow 3\x1b[4;1Hrow 4");
+
+    // At row 4 (bottom of scroll region), write a long line that wraps past column 10
+    feed_bytes(&mut grid, b"\x1b[4;1H0123456789wrapped");
+
+    let sb = scrollback_texts(&grid);
+    let vp = viewport_texts(&grid);
+
+    // Top row must be transferred to scrollback
+    assert_eq!(sb, vec!["row 1"]);
+
+    // Viewport rows inside scroll region shift up, and pinned rows below remain intact
+    assert_eq!(vp[0], "row 2");
+    assert_eq!(vp[1], "row 3");
+    assert_eq!(vp[2], "0123456789");
+    assert_eq!(vp[3], "wrapped");
+    assert_eq!(vp[4], "[PINNED 1]");
+    assert_eq!(vp[5], "[PINNED 2]");
+}
+
+
+
+
 

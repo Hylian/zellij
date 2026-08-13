@@ -1993,17 +1993,38 @@ impl Grid {
     }
     fn line_wrap(&mut self) {
         self.cursor.x = 0;
-        if self.cursor.y == self.height.saturating_sub(1) {
-            if self.alternate_screen_state.is_none() {
-                self.transfer_rows_to_lines_above(1);
-                self.hyperlink_tracker.offset_cursor_lines(1);
-            } else if !self.viewport.is_empty() {
-                self.viewport.pop_front();
+        let (scroll_region_top, scroll_region_bottom) = self.scroll_region;
+        if self.cursor.y == scroll_region_bottom {
+            if scroll_region_bottom == self.height.saturating_sub(1) && scroll_region_top == 0 {
+                if self.alternate_screen_state.is_none() {
+                    self.transfer_rows_to_lines_above(1);
+                    self.hyperlink_tracker.offset_cursor_lines(1);
+                } else if !self.viewport.is_empty() {
+                    self.viewport.pop_front();
+                }
+                let wrapped_row = Row::new();
+                self.viewport.push_back(wrapped_row);
+                self.selection.move_up(1);
+                self.output_buffer.update_all_lines();
+            } else {
+                if scroll_region_top == 0
+                    && self.alternate_screen_state.is_none()
+                    && !self.viewport.is_empty()
+                {
+                    self.transfer_rows_to_lines_above(1);
+                    self.hyperlink_tracker.offset_cursor_lines(1);
+                    self.selection.move_up(1);
+                } else if scroll_region_top < self.viewport.len() {
+                    self.viewport.remove(scroll_region_top);
+                }
+                let wrapped_row = Row::new();
+                if self.viewport.len() >= scroll_region_bottom {
+                    self.viewport.insert(scroll_region_bottom, wrapped_row);
+                } else {
+                    self.viewport.push_back(wrapped_row);
+                }
+                self.output_buffer.update_all_lines();
             }
-            let wrapped_row = Row::new();
-            self.viewport.push_back(wrapped_row);
-            self.selection.move_up(1);
-            self.output_buffer.update_all_lines();
         } else {
             self.cursor.y += 1;
             if self.viewport.len() <= self.cursor.y {
