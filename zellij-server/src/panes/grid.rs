@@ -3805,21 +3805,20 @@ impl Perform for Grid {
             self.move_cursor_forward_until_edge(move_by);
         } else if c == 'K' {
             // clear line (0 => right, 1 => left, 2 => all)
-            if let Some(clear_type) = params_iter.next().map(|param| param[0]) {
-                let mut char_to_replace = EMPTY_TERMINAL_CHARACTER;
-                if let Some(background_color) = self.cursor.pending_styles.background {
-                    char_to_replace
-                        .styles
-                        .update(|styles| styles.background = Some(background_color));
-                }
-                if clear_type == 0 {
-                    self.replace_characters_in_line_after_cursor(char_to_replace);
-                } else if clear_type == 1 {
-                    self.replace_characters_in_line_before_cursor(char_to_replace);
-                } else if clear_type == 2 {
-                    self.clear_cursor_line();
-                }
-            };
+            let clear_type = next_param_or(0);
+            let mut char_to_replace = EMPTY_TERMINAL_CHARACTER;
+            if let Some(background_color) = self.cursor.pending_styles.background {
+                char_to_replace
+                    .styles
+                    .update(|styles| styles.background = Some(background_color));
+            }
+            if clear_type == 0 {
+                self.replace_characters_in_line_after_cursor(char_to_replace);
+            } else if clear_type == 1 {
+                self.replace_characters_in_line_before_cursor(char_to_replace);
+            } else if clear_type == 2 {
+                self.clear_cursor_line();
+            }
         } else if c == 'J' {
             // clear all (0 => below, 1 => above, 2 => all, 3 => saved)
             let mut char_to_replace = EMPTY_TERMINAL_CHARACTER;
@@ -3828,24 +3827,23 @@ impl Perform for Grid {
                     .styles
                     .update(|styles| styles.background = Some(background_color));
             }
-            if let Some(clear_type) = params_iter.next().map(|param| param[0]) {
-                if clear_type == 0 {
-                    self.clear_all_after_cursor(char_to_replace);
-                } else if clear_type == 1 {
-                    self.clear_all_before_cursor(char_to_replace);
-                } else if clear_type == 2 {
-                    self.set_scroll_region_to_viewport_size();
-                    self.fill_viewport(char_to_replace);
-                    if let Some(images_to_reap) = self.sixel_grid.clear() {
-                        self.sixel_grid.reap_images(images_to_reap);
-                    }
-                } else if clear_type == 3 {
-                    self.clear_lines_above();
-                    if let Some(images_to_reap) = self.sixel_grid.clear() {
-                        self.sixel_grid.reap_images(images_to_reap);
-                    }
+            let clear_type = next_param_or(0);
+            if clear_type == 0 {
+                self.clear_all_after_cursor(char_to_replace);
+            } else if clear_type == 1 {
+                self.clear_all_before_cursor(char_to_replace);
+            } else if clear_type == 2 {
+                self.set_scroll_region_to_viewport_size();
+                self.fill_viewport(char_to_replace);
+                if let Some(images_to_reap) = self.sixel_grid.clear() {
+                    self.sixel_grid.reap_images(images_to_reap);
                 }
-            };
+            } else if clear_type == 3 {
+                self.clear_lines_above();
+                if let Some(images_to_reap) = self.sixel_grid.clear() {
+                    self.sixel_grid.reap_images(images_to_reap);
+                }
+            }
         } else if c == 'H' || c == 'f' {
             // goto row/col
             // we subtract 1 from the row/column because these are 1 indexed
