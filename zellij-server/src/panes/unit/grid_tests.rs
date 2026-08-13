@@ -9354,3 +9354,29 @@ fn a_character_wider_than_two_columns_advances_the_cursor_by_its_full_width() {
     assert_eq!(row.width(), 4);
     assert_eq!(cursor_position(&grid), Some((4, 0)));
 }
+
+#[test]
+fn csi_k_parameterless_clears_from_cursor_to_end_of_line() {
+    let mut parser = vte::Parser::new();
+    let mut grid = create_grid_with_size_and_raw(10, 40, &[]);
+    // Write "hello world", move cursor to col 5 (after "hello"), send parameter-less \e[K
+    for byte in b"hello world\x1b[1;6H\x1b[K" {
+        parser.advance(&mut grid, *byte);
+    }
+    let vp = viewport_texts(&grid);
+    assert_eq!(vp[0], "hello");
+}
+
+#[test]
+fn csi_j_parameterless_clears_below_cursor() {
+    let mut parser = vte::Parser::new();
+    let mut grid = create_grid_with_size_and_raw(10, 40, &[]);
+    // Fill 3 lines, move cursor to line 2 (1-indexed), send parameter-less \e[J
+    for byte in b"line1\r\nline2\r\nline3\x1b[2;1H\x1b[J" {
+        parser.advance(&mut grid, *byte);
+    }
+    let vp = viewport_texts(&grid);
+    assert_eq!(vp[0], "line1");
+    assert_eq!(vp[1], "");
+    assert_eq!(vp[2], "");
+}
