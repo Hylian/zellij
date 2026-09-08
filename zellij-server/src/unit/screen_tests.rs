@@ -430,6 +430,7 @@ impl MockScreen {
             (self.main_client_id, false),
             None,
             None,
+            None,
         ));
         self.last_opened_tab_index = Some(tab_index);
         std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
@@ -523,6 +524,7 @@ impl MockScreen {
             (self.main_client_id, false),
             None,
             None,
+            None,
         ));
         self.last_opened_tab_index = Some(tab_index);
         screen_thread
@@ -560,6 +562,7 @@ impl MockScreen {
             0,
             true,
             (self.main_client_id, false),
+            None,
             None,
             None,
         ));
@@ -608,6 +611,7 @@ impl MockScreen {
             tab_index,
             true,
             (self.main_client_id, false),
+            None,
             None,
             None,
         ));
@@ -4331,6 +4335,7 @@ pub fn screen_can_break_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -4431,6 +4436,7 @@ pub fn screen_can_break_floating_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(200));
     // move back to make sure the other pane is in the previous tab
@@ -4517,6 +4523,7 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -4590,6 +4597,7 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
         1,
         true,
         (1, false),
+        None,
         None,
         None,
     ));
@@ -4666,6 +4674,7 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -4728,6 +4737,7 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     let _ = mock_screen
@@ -4784,6 +4794,7 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
         1,
         true,
         (1, false),
+        None,
         None,
         None,
     ));
@@ -9476,3 +9487,59 @@ fn empty_reply_with_paused_pane_drains_buffer_without_phantom_write() {
         "queue fully consumed by post-resume processing"
     );
 }
+
+#[test]
+pub fn format_dir_name_tests() {
+    use crate::screen::format_dir_name;
+    use std::path::Path;
+    assert_eq!(format_dir_name(Path::new("/")), Some("/".to_string()));
+    assert_eq!(format_dir_name(Path::new("/usr/local/bin")), Some("bin".to_string()));
+    assert_eq!(format_dir_name(Path::new("/home/user/my-project")), Some("my-project".to_string()));
+
+    let home = std::env::var("HOME").ok();
+    if let Some(ref home_dir) = home {
+        assert_eq!(format_dir_name(Path::new(home_dir)), Some("~".to_string()));
+    }
+}
+
+#[test]
+pub fn apply_layout_names_tab_from_cwd_and_respects_custom_name() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    let client_id = 1;
+
+    // 1. New tab without custom name: tab_cwd updates name to folder basename
+    screen.new_tab(0, (vec![], vec![]), None, Some(client_id)).unwrap();
+    assert_eq!(screen.get_tab_by_id(0).unwrap().name, "Tab #1");
+    assert!(!screen.get_tab_by_id(0).unwrap().is_name_custom);
+
+    let tab_cwd = Some(PathBuf::from("/home/user/work/my-cool-project"));
+    if let Some(tab) = screen.tabs.get_mut(&0) {
+        if !tab.is_name_custom {
+            if let Some(name) = crate::screen::format_dir_name(tab_cwd.as_ref().unwrap()) {
+                tab.name = name.clone();
+                tab.prev_name = name;
+            }
+        }
+    }
+    assert_eq!(screen.get_tab_by_id(0).unwrap().name, "my-cool-project");
+
+    // 2. New tab with explicit custom name: tab_cwd does not overwrite it
+    screen.new_tab(1, (vec![], vec![]), Some("CustomTab".to_string()), Some(client_id)).unwrap();
+    assert_eq!(screen.get_tab_by_id(1).unwrap().name, "CustomTab");
+    assert!(screen.get_tab_by_id(1).unwrap().is_name_custom);
+
+    if let Some(tab) = screen.tabs.get_mut(&1) {
+        if !tab.is_name_custom {
+            if let Some(name) = crate::screen::format_dir_name(tab_cwd.as_ref().unwrap()) {
+                tab.name = name.clone();
+                tab.prev_name = name;
+            }
+        }
+    }
+    assert_eq!(screen.get_tab_by_id(1).unwrap().name, "CustomTab");
+}
+

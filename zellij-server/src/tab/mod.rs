@@ -188,6 +188,7 @@ pub(crate) struct Tab {
     pub position: usize,
     pub name: String,
     pub prev_name: String,
+    pub is_name_custom: bool,
     tiled_panes: TiledPanes,
     floating_panes: FloatingPanes,
     suppressed_panes: SuppressedPanes,
@@ -794,10 +795,10 @@ impl Tab {
         web_server_ip: IpAddr,
         web_server_port: u16,
     ) -> Self {
-        let name = if name.is_empty() {
-            format!("Tab #{}", id + 1)
+        let (name, is_name_custom) = if name.is_empty() {
+            (format!("Tab #{}", id + 1), false)
         } else {
-            name
+            (name, true)
         };
 
         let mut connected_clients = HashSet::new();
@@ -853,6 +854,7 @@ impl Tab {
             suppressed_panes: HashMap::new(),
             name: name.clone(),
             prev_name: name,
+            is_name_custom,
             max_panes,
             viewport,
             display_area,
