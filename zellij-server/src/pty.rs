@@ -1309,6 +1309,15 @@ impl Pty {
             new_tab_pane_ids.len(),
             new_tab_floating_pane_ids.len()
         );
+        let tab_cwd = match &default_shell {
+            TerminalAction::RunCommand(cmd) => cmd.cwd.clone(),
+            TerminalAction::OpenFile(p) => p.cwd.clone(),
+        }
+        .or_else(|| {
+            new_tab_pane_ids
+                .first()
+                .and_then(|(term_id, _)| self.terminal_cwds.get(term_id).cloned())
+        });
         self.bus
             .senders
             .send_to_screen(ScreenInstruction::ApplyLayout(
@@ -1322,6 +1331,7 @@ impl Pty {
                 (client_id, is_web_client),
                 direct_completion_tx,
                 blocking_terminal,
+                tab_cwd,
             ))
             .with_context(err_context)?;
         let mut terminals_to_start = vec![];

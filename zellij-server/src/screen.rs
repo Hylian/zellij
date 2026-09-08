@@ -31,7 +31,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str;
 use std::time::{Duration, Instant};
@@ -513,6 +513,7 @@ pub enum ScreenInstruction {
         (ClientId, bool),               // bool -> is_web_client
         Option<NotificationEnd>,        // regular completion signal
         Option<(u32, NotificationEnd)>, // blocking_terminal (terminal_id, completion_tx)
+        Option<PathBuf>,                // tab_cwd
     ),
     SwitchTabNext(ClientId, Option<NotificationEnd>),
     SwitchTabPrev(ClientId, Option<NotificationEnd>),
@@ -5784,6 +5785,7 @@ impl Screen {
                                     .push_str(&clean_string_from_control_and_linebreak(c));
                             },
                         }
+                        active_tab.is_name_custom = true;
                         self.log_and_report_session_state()
                             .with_context(err_context)
                     },
@@ -6527,6 +6529,8 @@ impl Screen {
         let tab = self.tabs.get_mut(&tab_index).with_context(err_context)?;
         if let Some(new_tab_name) = new_tab_name {
             tab.name = new_tab_name.clone();
+            tab.prev_name = new_tab_name;
+            tab.is_name_custom = true;
         }
         let tab_size = tab.size;
         for mut pane in extracted_panes {
@@ -8022,6 +8026,29 @@ fn find_already_running_panes(
     }
 
     (tiled_to_ignore, floating_indices)
+}
+
+pub(crate) fn format_dir_name(dir: &Path) -> Option<String> {
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    if let Some(ref home_path) = home {
+        if dir == home_path.as_path() {
+            return Some("~".to_string());
+        }
+        if let (Ok(dir_canon), Ok(home_canon)) = (dir.canonicalize(), home_path.canonicalize()) {
+            if dir_canon == home_canon {
+                return Some("~".to_string());
+            }
+        }
+    }
+    if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    if dir.as_os_str() == "/" {
+        return Some("/".to_string());
+    }
+    None
 }
 
 // The box is here in order to make the
@@ -9777,6 +9804,7 @@ pub(crate) fn screen_thread_main(
                     swap_floating_layouts
                         .unwrap_or_else(|| screen.default_layout.swap_floating_layouts.clone()),
                 );
+                let tab_name = tab_name.filter(|n| !n.trim().is_empty());
                 screen.new_tab(
                     tab_index,
                     resolved_swap_layouts,
@@ -9810,11 +9838,22 @@ pub(crate) fn screen_thread_main(
                 (client_id, is_web_client),
                 mut completion_tx,
                 blocking_terminal,
+                tab_cwd,
             ) => {
                 log::info!(
                     "ScreenInstruction::ApplyLayout: applying layout for tab {}",
                     tab_id
                 );
+                if let Some(tab) = screen.tabs.get_mut(&tab_id) {
+                    if !tab.is_name_custom {
+                        if let Some(ref tab_cwd) = tab_cwd {
+                            if let Some(name) = format_dir_name(tab_cwd) {
+                                tab.name = name.clone();
+                                tab.prev_name = name;
+                            }
+                        }
+                    }
+                }
                 // tab_id is a stable identifier from NewTab instruction
                 if let Some(first_terminal_pane) = new_pane_pids.iter().next() {
                     completion_tx
@@ -10430,7 +10469,9 @@ pub(crate) fn screen_thread_main(
                             tab_layout_info.tab_index = active_tab.id;
                             // Set the tab name if provided
                             if let Some(name) = tab_layout_info.tab_name.take() {
-                                active_tab.name = name;
+                                active_tab.name = name.clone();
+                                active_tab.prev_name = name;
+                                active_tab.is_name_custom = true;
                             }
 
                             // Find already-running panes for this tab
@@ -10474,7 +10515,9 @@ pub(crate) fn screen_thread_main(
 
                         // Set the tab name if provided
                         if let Some(name) = tab_layout_info.tab_name.take() {
-                            tab.name = name;
+                            tab.name = name.clone();
+                            tab.prev_name = name;
+                            tab.is_name_custom = true;
                         }
 
                         // Find already-running panes for this tab
@@ -11246,6 +11289,8 @@ pub(crate) fn screen_thread_main(
                 match screen.get_tab_by_position_mut(tab_position) {
                     Some(tab) => {
                         tab.name = String::from_utf8_lossy(&new_name).to_string();
+                        tab.prev_name = tab.name.clone();
+                        tab.is_name_custom = true;
                     },
                     None => {
                         log::error!("Failed to find tab at position: {}", tab_position);
@@ -11285,6 +11330,8 @@ pub(crate) fn screen_thread_main(
                 // Use get_tab_by_id_mut() helper method
                 if let Some(tab) = screen.get_tab_by_id_mut(tab_id) {
                     tab.name = String::from_utf8_lossy(&new_name).to_string();
+                    tab.prev_name = tab.name.clone();
+                    tab.is_name_custom = true;
                     screen.log_and_report_session_state()?;
                 } else {
                     log::error!("Failed to find tab with ID: {}", tab_id);
