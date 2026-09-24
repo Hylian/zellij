@@ -222,9 +222,9 @@ pub mod action {
         CloseTab(super::CloseTabAction),
         #[prost(message, tag="47")]
         GoToTab(super::GoToTabAction),
-        #[prost(message, tag="48")]
+        #[prost(message, tag="70")]
         GoToTabName(super::GoToTabNameAction),
-        #[prost(message, tag="49")]
+        #[prost(message, tag="71")]
         ToggleTab(super::ToggleTabAction),
         #[prost(message, tag="50")]
         TabNameInput(super::TabNameInputAction),
@@ -2068,6 +2068,10 @@ pub struct Options {
     pub scroll_mode_sync: ::core::option::Option<bool>,
     #[prost(enumeration="ThemeHue", optional, tag="69")]
     pub explicit_theme_hue: ::core::option::Option<i32>,
+    #[prost(float, optional, tag="70")]
+    pub scroll_acceleration_factor: ::core::option::Option<f32>,
+    #[prost(bool, optional, tag="71")]
+    pub scroll_inertia: ::core::option::Option<bool>,
 }
 /// Pane-targeting action messages
 #[allow(clippy::derive_partial_eq_without_eq)]

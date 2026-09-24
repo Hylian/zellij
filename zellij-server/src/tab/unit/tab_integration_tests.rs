@@ -282,6 +282,8 @@ fn create_new_tab(size: Size, default_mode: ModeInfo) -> Tab {
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -474,6 +476,8 @@ fn create_new_tab_without_pane_frames(size: Size, default_mode: ModeInfo) -> Tab
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -585,6 +589,8 @@ fn create_new_tab_with_swap_layouts(
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -693,6 +699,8 @@ fn create_new_tab_with_os_api(
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -787,6 +795,8 @@ fn create_new_tab_with_layout(size: Size, default_mode: ModeInfo, layout: &str) 
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -895,6 +905,8 @@ fn create_new_tab_with_mock_pty_writer(
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -994,6 +1006,8 @@ fn create_new_tab_with_sixel_support(
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -12417,6 +12431,226 @@ fn test_scroll_wheel_down_scrolls_pane() {
 }
 
 #[test]
+fn test_smooth_scroll_momentum_friction_drain() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    let mut content = String::new();
+    for i in 0..100 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    // Set up an active fling velocity in the queue
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.velocity = 5.0;
+        queue.is_draining = true;
+        queue.last_position = Position::new(10, 60);
+    }
+
+    // Step through the drain frames and verify velocity decays under friction to 0
+    for _ in 0..200 {
+        let prev_vel = tab
+            .smooth_scroll_queues
+            .get(&client_id)
+            .map(|q| q.velocity)
+            .unwrap_or(0.0);
+        let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+        let cur_vel = tab
+            .smooth_scroll_queues
+            .get(&client_id)
+            .map(|q| q.velocity)
+            .unwrap_or(0.0);
+        if prev_vel > 0.0 && cur_vel > 0.0 {
+            assert!(cur_vel < prev_vel, "Velocity should decelerate with friction");
+        }
+        if !tab
+            .smooth_scroll_queues
+            .get(&client_id)
+            .map(|q| q.is_draining)
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+
+    // Queue should now be completely at rest
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.velocity, 0.0);
+    assert!(!queue.is_draining);
+}
+
+#[test]
+fn test_multi_line_scroll_animates_one_line_at_a_time() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.update_scroll_inertia(false);
+
+    let mut content = String::new();
+    for i in 0..100 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    // Set up 2 pending lines in queue (1-line-at-a-time micro-smoothing threshold)
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.pending_lines = 2;
+        queue.scroll_direction = 1;
+        queue.is_draining = true;
+        queue.last_position = Position::new(10, 60);
+    }
+
+    // First frame drains 1 line, leaving 1
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 1);
+    assert!(queue.is_draining);
+
+    // Second frame drains last line, leaving 0 and stopping drain
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 0);
+    assert!(!queue.is_draining);
+}
+
+#[test]
+fn test_congested_scroll_queue_steps_multiple_lines_to_prevent_delay() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.update_scroll_inertia(false);
+
+    let mut content = String::new();
+    for i in 0..100 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    // Set up a large backlog (10 pending lines) in queue
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.pending_lines = 10;
+        queue.scroll_direction = 1;
+        queue.is_draining = true;
+        queue.last_position = Position::new(10, 60);
+    }
+
+    // When pending_lines is 10, it drains ((10 * 2 + 1) / 3) = 7 lines in a single frame
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 3); // 10 - 7 = 3
+    assert!(queue.is_draining);
+
+    // When pending_lines is 3, it drains ((3 * 2 + 1) / 3) = 2 lines in the next frame
+    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.pending_lines, 1); // 3 - 2 = 1
+    assert!(queue.is_draining);
+}
+
+#[test]
+fn test_scroll_inertia_disabled_no_momentum_drain() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    tab.update_scroll_inertia(false);
+    tab.update_scroll_acceleration_factor(3.5);
+
+    let mut content = String::new();
+    for i in 0..100 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    let point = Position::new(10, 60);
+    tab.handle_scrollwheel_up(&point, 1, client_id).unwrap();
+
+    // Verify that with inertia disabled, no background drain velocity is enqueued
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.velocity, 0.0);
+    assert!(!queue.is_draining);
+}
+
+#[test]
+fn test_opposing_scroll_stops_fling() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    // 1. Simulate an upward fling in progress
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.velocity = 10.0;
+        queue.is_draining = true;
+        queue.last_event_time = std::time::Instant::now();
+    }
+
+    // 2. An opposing scroll down should stop the fling immediately
+    tab.handle_mouse_event(
+        &MouseEvent::new_scroll_down_event(Position::new(10, 60)),
+        client_id,
+    )
+    .unwrap();
+
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.velocity, 0.0);
+    assert!(!queue.is_draining);
+}
+
+#[test]
+fn test_slow_swipe_resets_fling_and_grabs_viewport() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    // 1. Set up an active fling in progress from 100ms ago
+    {
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.velocity = 8.0;
+        queue.is_draining = true;
+        queue.last_event_time =
+            std::time::Instant::now() - std::time::Duration::from_millis(100);
+    }
+
+    // 2. A slow swipe in the same direction (dt >= 65ms) grabs viewport and halts fling
+    tab.handle_mouse_event(
+        &MouseEvent::new_scroll_up_event(Position::new(10, 60)),
+        client_id,
+    )
+    .unwrap();
+
+    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
+    assert_eq!(queue.velocity, 0.0);
+    assert!(!queue.is_draining);
+}
+
+#[test]
 fn test_scroll_on_inactive_pane_scrolls_that_pane() {
     let size = Size {
         cols: 121,
@@ -13944,6 +14178,8 @@ fn create_new_tab_with_plugin_receiver(
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -15729,6 +15965,8 @@ fn create_new_tab_with_server_receiver(
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         8080,
     );

@@ -452,6 +452,7 @@ pub enum ScreenInstruction {
     ScrollUpAt(Position, ClientId, Option<NotificationEnd>),
     ScrollDown(ClientId, Option<NotificationEnd>),
     ScrollDownAt(Position, ClientId, Option<NotificationEnd>),
+    DrainSmoothScrollQueue(ClientId),
     ScrollToBottom(ClientId, Option<NotificationEnd>),
     ScrollToTop(ClientId, Option<NotificationEnd>),
     ScrollToPreviousPrompt(ClientId, Option<NotificationEnd>),
@@ -829,6 +830,8 @@ pub enum ScreenInstruction {
         host_notification_protocol: HostNotificationProtocol,
         nested_session_handling: NestedSessionHandling,
         dangerously_enable_paste_buffer_read: bool,
+        scroll_acceleration_factor: f32,
+        scroll_inertia: bool,
     },
     RerunCommandPane(u32, Option<NotificationEnd>), // u32 - terminal pane id
     ResizePaneWithId(ResizeStrategy, PaneId),
@@ -1135,6 +1138,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ToggleActiveSyncTab(..) => ScreenContext::ToggleActiveSyncTab,
             ScreenInstruction::ScrollUpAt(..) => ScreenContext::ScrollUpAt,
             ScreenInstruction::ScrollDownAt(..) => ScreenContext::ScrollDownAt,
+            ScreenInstruction::DrainSmoothScrollQueue(..) => ScreenContext::DrainSmoothScrollQueue,
             ScreenInstruction::MouseEvent(..) => ScreenContext::MouseEvent,
             ScreenInstruction::Copy(..) => ScreenContext::Copy,
             ScreenInstruction::ToggleTab(..) => ScreenContext::ToggleTab,
@@ -1586,6 +1590,8 @@ pub(crate) struct Screen {
     visual_bell: bool,
     focus_follows_mouse: bool,
     mouse_click_through: bool,
+    scroll_acceleration_factor: f32,
+    scroll_inertia: bool,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
     // the below are the configured values - the ones that will be set if and when the web server
     // is brought online
@@ -1726,6 +1732,8 @@ impl Screen {
         visual_bell: bool,
         focus_follows_mouse: bool,
         mouse_click_through: bool,
+        scroll_acceleration_factor: f32,
+        scroll_inertia: bool,
         web_server_ip: IpAddr,
         web_server_port: u16,
         nested_session_handling: NestedSessionHandling,
@@ -1796,6 +1804,8 @@ impl Screen {
             visual_bell,
             focus_follows_mouse,
             mouse_click_through,
+            scroll_acceleration_factor,
+            scroll_inertia,
             web_server_ip,
             web_server_port,
             render_blocker: RenderBlocker::new(100),
@@ -4842,6 +4852,8 @@ impl Screen {
             self.mouse_hover_tips,
             self.focus_follows_mouse,
             self.mouse_click_through,
+            self.scroll_acceleration_factor,
+            self.scroll_inertia,
             self.web_server_ip,
             self.web_server_port,
         );
@@ -6868,6 +6880,8 @@ impl Screen {
         host_notification_protocol: HostNotificationProtocol,
         nested_session_handling: NestedSessionHandling,
         dangerously_enable_paste_buffer_read: bool,
+        scroll_acceleration_factor: f32,
+        scroll_inertia: bool,
         client_id: ClientId,
     ) -> Result<()> {
         let should_support_arrow_fonts = !simplified_ui;
@@ -6902,6 +6916,8 @@ impl Screen {
         self.set_host_notification_protocol(host_notification_protocol);
         self.nested_session_handling = nested_session_handling;
         self.paste_buffer_read_enabled = dangerously_enable_paste_buffer_read;
+        self.scroll_acceleration_factor = scroll_acceleration_factor;
+        self.scroll_inertia = scroll_inertia;
         self.default_mode_info
             .update_arrow_fonts(should_support_arrow_fonts);
         self.default_mode_info
@@ -6932,6 +6948,8 @@ impl Screen {
             tab.update_mouse_click_through(mouse_click_through);
             tab.update_selection_options(osc133_command_selection, self.word_separators.clone());
             tab.sync_stacked_pane_list_mode();
+            tab.update_scroll_acceleration_factor(scroll_acceleration_factor);
+            tab.update_scroll_inertia(scroll_inertia);
         }
 
         // Clear hover state when disabled
@@ -8165,6 +8183,8 @@ pub(crate) fn screen_thread_main(
     let dangerously_enable_paste_buffer_read = config_options
         .dangerously_enable_paste_buffer_read
         .unwrap_or(false);
+    let scroll_acceleration_factor = config_options.scroll_acceleration_factor.unwrap_or(3.5);
+    let scroll_inertia = config_options.scroll_inertia.unwrap_or(true);
 
     let thread_senders = bus.senders.clone();
     let mut screen = Screen::new(
@@ -8213,6 +8233,8 @@ pub(crate) fn screen_thread_main(
         visual_bell,
         focus_follows_mouse,
         mouse_click_through,
+        scroll_acceleration_factor,
+        scroll_inertia,
         web_server_ip,
         web_server_port,
         nested_session_handling,
@@ -9426,6 +9448,15 @@ pub(crate) fn screen_thread_main(
                         .handle_scrollwheel_down(&point, 3, client_id), ?
                 );
                 screen.sync_scroll_mode_if_scroll_changed(client_id, was_scrolled)?;
+                screen.render(None)?;
+            },
+            ScreenInstruction::DrainSmoothScrollQueue(client_id) => {
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| tab
+                        .drain_smooth_scroll_step(client_id), ?
+                );
                 screen.render(None)?;
             },
             ScreenInstruction::ScrollToBottom(
@@ -11634,6 +11665,8 @@ pub(crate) fn screen_thread_main(
                 host_notification_protocol,
                 nested_session_handling,
                 dangerously_enable_paste_buffer_read,
+                scroll_acceleration_factor,
+                scroll_inertia,
             } => {
                 screen.host_theme_dark_styling = host_theme_dark;
                 screen.host_theme_light_styling = host_theme_light;
@@ -11667,6 +11700,8 @@ pub(crate) fn screen_thread_main(
                         host_notification_protocol,
                         nested_session_handling,
                         dangerously_enable_paste_buffer_read,
+                        scroll_acceleration_factor,
+                        scroll_inertia,
                         client_id,
                     )
                     .non_fatal();

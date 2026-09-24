@@ -235,6 +235,8 @@ fn create_new_tab_with_plugin_receiver(
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -326,6 +328,8 @@ fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );
@@ -423,6 +427,8 @@ fn create_new_tab_with_cell_size(
         true,
         false, // focus_follows_mouse
         false, // mouse_click_through
+        3.5,   // scroll_acceleration_factor
+        true,  // scroll_inertia
         web_server_ip,
         web_server_port,
     );

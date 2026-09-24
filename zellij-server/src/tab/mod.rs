@@ -185,6 +185,36 @@ enum BufferedTabInstruction {
     HoldPane(PaneId, Option<i32>, bool, RunCommand), // Option<i32> is the exit status, bool is is_first_run
 }
 
+#[derive(Debug, Clone)]
+pub struct SmoothScrollQueue {
+    pub velocity: f32,
+    pub fractional_step: f32,
+    pub pending_lines: usize,
+    pub scroll_direction: i8,
+    pub last_position: Position,
+    pub last_step_time: Instant,
+    pub last_event_time: Instant,
+    pub prev_instantaneous_speed: f32,
+    pub is_draining: bool,
+}
+
+impl Default for SmoothScrollQueue {
+    fn default() -> Self {
+        let past = Instant::now() - std::time::Duration::from_secs(1);
+        Self {
+            velocity: 0.0,
+            fractional_step: 0.0,
+            pending_lines: 0,
+            scroll_direction: 0,
+            last_position: Position::new(0, 0),
+            last_step_time: past,
+            last_event_time: past,
+            prev_instantaneous_speed: 0.0,
+            is_draining: false,
+        }
+    }
+}
+
 pub(crate) struct Tab {
     pub id: usize,
     pub position: usize,
@@ -257,6 +287,7 @@ pub(crate) struct Tab {
     last_mouse_activity_time: HashMap<ClientId, Instant>,
     last_hint_text: HashMap<ClientId, BTreeMap<usize, StyledText>>,
     last_active_pane_scroll: HashMap<ClientId, Option<(usize, usize)>>,
+    pub smooth_scroll_queues: HashMap<ClientId, SmoothScrollQueue>,
     current_pane_group: Rc<RefCell<PaneGroups>>,
     advanced_mouse_actions: bool,
     mouse_scroll_resize: bool,
@@ -266,6 +297,8 @@ pub(crate) struct Tab {
     mouse_click_through: bool,
     osc133_command_selection: bool,
     word_separators: String,
+    pub scroll_acceleration_factor: f32,
+    pub scroll_inertia: bool,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
     connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     // the below are the configured values - the ones that will be set if and when the web server
@@ -886,6 +919,8 @@ impl Tab {
         mouse_hover_tips: bool,
         focus_follows_mouse: bool,
         mouse_click_through: bool,
+        scroll_acceleration_factor: f32,
+        scroll_inertia: bool,
         web_server_ip: IpAddr,
         web_server_port: u16,
     ) -> Self {
@@ -1019,6 +1054,7 @@ impl Tab {
             last_mouse_activity_time: HashMap::new(),
             last_hint_text: HashMap::new(),
             last_active_pane_scroll: HashMap::new(),
+            smooth_scroll_queues: HashMap::new(),
             current_pane_group,
             currently_marking_pane_group,
             advanced_mouse_actions,
@@ -1029,6 +1065,8 @@ impl Tab {
             mouse_click_through,
             osc133_command_selection: true,
             word_separators: DEFAULT_WORD_SEPARATORS.to_owned(),
+            scroll_acceleration_factor,
+            scroll_inertia,
             connected_clients_in_app,
             web_server_ip,
             web_server_port,
@@ -6441,6 +6479,89 @@ impl Tab {
         MouseHandler::handle_scrollwheel_down(self, point, lines, client_id)
     }
 
+    pub fn drain_smooth_scroll_step(&mut self, client_id: ClientId) -> Result<MouseEffect> {
+        let now = Instant::now();
+        const FRICTION: f32 = 0.955;
+        const MIN_VELOCITY: f32 = 0.08;
+
+        let (step_to_execute, position, has_more) = {
+            if let Some(queue) = self.smooth_scroll_queues.get_mut(&client_id) {
+                queue.last_step_time = now;
+
+                if queue.pending_lines > 0 {
+                    let dir = queue.scroll_direction;
+                    // Dynamically step ~2/3 of pending lines when the queue builds up so
+                    // gentle 1-2 line ticks still animate 1 line at a time while rapid
+                    // multi-line swipes catch up in 1-2 frames without lag:
+                    // - 1-2 lines pending: 1 line per frame (1-line-at-a-time micro-smoothing)
+                    // - 3+ lines pending: (n * 2 + 1) / 3 (~67% catch-up per step)
+                    let lines_to_drain = ((queue.pending_lines * 2 + 1) / 3)
+                        .max(1)
+                        .min(queue.pending_lines);
+
+                    queue.pending_lines -= lines_to_drain;
+                    let has_more = queue.pending_lines > 0
+                        || (self.scroll_inertia && queue.velocity.abs() >= MIN_VELOCITY);
+                    if !has_more {
+                        queue.is_draining = false;
+                    }
+                    (Some((dir, lines_to_drain)), queue.last_position, has_more)
+                } else if self.scroll_inertia && queue.velocity.abs() >= MIN_VELOCITY {
+                    let dir = if queue.velocity > 0.0 { 1 } else { -1 };
+                    queue.fractional_step += queue.velocity.abs();
+                    queue.velocity *= FRICTION;
+
+                    let step = if queue.fractional_step >= 1.0 {
+                        let int_lines = queue.fractional_step.floor() as usize;
+                        let lines_to_drain = ((int_lines * 2 + 1) / 3).max(1).min(int_lines);
+                        queue.fractional_step -= lines_to_drain as f32;
+                        if lines_to_drain > 0 {
+                            Some((dir, lines_to_drain))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let has_more = queue.velocity.abs() >= MIN_VELOCITY || queue.pending_lines > 0;
+                    if !has_more {
+                        queue.velocity = 0.0;
+                        queue.fractional_step = 0.0;
+                        queue.is_draining = false;
+                    }
+                    (step, queue.last_position, has_more)
+                } else {
+                    queue.velocity = 0.0;
+                    queue.fractional_step = 0.0;
+                    queue.pending_lines = 0;
+                    queue.is_draining = false;
+                    (None, queue.last_position, false)
+                }
+            } else {
+                (None, Position::new(0, 0), false)
+            }
+        };
+
+        let effect = match step_to_execute {
+            Some((1, count)) => {
+                MouseHandler::execute_scroll_step_up(self, &position, count, client_id)?
+            },
+            Some((-1, count)) => {
+                MouseHandler::execute_scroll_step_down(self, &position, count, client_id)?
+            },
+            _ => MouseEffect::default(),
+        };
+
+        if has_more {
+            let _ = self
+                .senders
+                .send_to_background_jobs(BackgroundJob::DrainSmoothScrollQueue { client_id });
+        }
+
+        Ok(effect)
+    }
+
     fn get_pane_id_at(
         &mut self,
         point: &Position,
@@ -7630,6 +7751,12 @@ impl Tab {
     ) {
         self.osc133_command_selection = osc133_command_selection;
         self.word_separators = word_separators;
+    }
+    pub fn update_scroll_acceleration_factor(&mut self, factor: f32) {
+        self.scroll_acceleration_factor = factor;
+    }
+    pub fn update_scroll_inertia(&mut self, scroll_inertia: bool) {
+        self.scroll_inertia = scroll_inertia;
     }
     pub fn clear_mouse_hover_state(&mut self) {
         self.mouse_hover_pane_id.clear();

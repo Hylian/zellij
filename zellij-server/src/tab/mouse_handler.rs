@@ -1414,10 +1414,10 @@ impl MouseHandler {
                     }
                 }
                 if event.wheel_up {
-                    return Ok(MouseAction::ScrollUp { pane_id, lines: 3 });
+                    return Ok(MouseAction::ScrollUp { pane_id, lines: 1 });
                 }
                 if event.wheel_down {
-                    return Ok(MouseAction::ScrollDown { pane_id, lines: 3 });
+                    return Ok(MouseAction::ScrollDown { pane_id, lines: 1 });
                 }
             }
             return Ok(MouseAction::NoAction);
@@ -1682,7 +1682,7 @@ impl MouseHandler {
         Ok(())
     }
 
-    pub(crate) fn handle_scrollwheel_up(
+    pub(crate) fn execute_scroll_step_up(
         tab: &mut Tab,
         point: &Position,
         lines: usize,
@@ -1695,10 +1695,11 @@ impl MouseHandler {
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
             if let Some(mouse_event) = pane.mouse_scroll_up(&relative_position) {
-                tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
-                    .with_context(err_context)?;
+                for _ in 0..lines {
+                    tab.write_to_terminal_at(mouse_event.clone().into_bytes(), point, client_id)
+                        .with_context(err_context)?;
+                }
             } else if pane.is_alternate_mode_active() {
-                // separate writes so each sequence gets adjusted for cursor keys mode
                 for _ in 0..lines {
                     tab.write_to_terminal_at("\u{1b}[A".as_bytes().to_owned(), point, client_id)
                         .with_context(err_context)?;
@@ -1710,7 +1711,129 @@ impl MouseHandler {
         Ok(MouseEffect::default())
     }
 
-    pub(crate) fn handle_scrollwheel_down(
+    pub(crate) fn handle_scrollwheel_up(
+        tab: &mut Tab,
+        point: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<MouseEffect> {
+        let is_test = cfg!(test);
+        let now = std::time::Instant::now();
+
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.last_position = *point;
+
+        let dt = now.duration_since(queue.last_event_time).as_millis();
+        queue.last_event_time = now;
+
+        // 1. Opposing direction check:
+        let was_opposing = queue.velocity < -0.01 || queue.scroll_direction == -1;
+        if was_opposing {
+            queue.velocity = 0.0;
+            queue.fractional_step = 0.0;
+            queue.pending_lines = 0;
+            queue.is_draining = false;
+        }
+        queue.scroll_direction = 1;
+
+        let instantaneous_speed = (lines as f32 * 14.0) / (dt.max(4) as f32);
+        let prev_speed = queue.prev_instantaneous_speed;
+        queue.prev_instantaneous_speed = instantaneous_speed;
+
+        // Slow grab check: slow movement halts any active fling/drain immediately
+        let is_slow_grab = dt >= 80 || instantaneous_speed < 0.22;
+        if queue.is_draining && !was_opposing && is_slow_grab {
+            queue.velocity = 0.0;
+            queue.fractional_step = 0.0;
+            queue.pending_lines = 0;
+            queue.is_draining = false;
+        }
+
+        // 2. Acceleration calculation:
+        //    Small / isolated scroll inputs (dt >= 100ms or event rate <= 35 Hz) scroll strictly 1:1.
+        //    Continuous rapid swipes smoothly ramp speed_scale up to scroll_acceleration_factor.
+        let speed_scale = if tab.scroll_acceleration_factor > 1.0 && dt < 100 {
+            let fps_rate = 1000.0 / (dt.max(4) as f32);
+            let excess_speed = ((fps_rate - 35.0) / 65.0).clamp(0.0, 1.0);
+            1.0 + (tab.scroll_acceleration_factor - 1.0) * excess_speed
+        } else {
+            1.0
+        };
+
+        // 3. Accumulate lines to scroll
+        let lines_to_step = (lines as f32 * speed_scale) + queue.fractional_step;
+        let int_lines = lines_to_step.floor() as usize;
+        queue.fractional_step = lines_to_step - int_lines as f32;
+
+        if is_test {
+            return Self::execute_scroll_step_up(tab, point, lines, client_id);
+        }
+
+        // 4. Animate / step lines:
+        //    Add newly requested lines to pending_lines first, then immediately step
+        //    ~2/3 of the combined queue ((n * 2 + 1) / 3) so gentle 1-2 line ticks
+        //    still step 1 line at a time while rapid incoming events immediately
+        //    flush accumulated backlog.
+        queue.pending_lines += int_lines;
+        let immediate_lines = if queue.pending_lines == 0 {
+            0
+        } else {
+            ((queue.pending_lines * 2 + 1) / 3)
+                .max(1)
+                .min(queue.pending_lines)
+        };
+        queue.pending_lines -= immediate_lines;
+
+        // 5. Inertia fling handling (only when scroll_inertia is true)
+        if tab.scroll_inertia {
+            let accel_multiplier = (tab.scroll_acceleration_factor / 3.5).max(0.1);
+            let gesture_is_accelerating = instantaneous_speed > prev_speed + 0.05;
+            let is_flick = dt < 80 && instantaneous_speed >= 0.28 && tab.scroll_acceleration_factor > 1.0;
+            let current_velocity = queue.velocity.max(0.0);
+
+            if is_flick {
+                let boost = if current_velocity > 0.3 {
+                    if gesture_is_accelerating || instantaneous_speed > current_velocity {
+                        let diff = (instantaneous_speed - current_velocity).max(0.0);
+                        (diff * 1.5 + (lines as f32) * 0.8).min(8.0) * accel_multiplier
+                    } else {
+                        (0.5 * accel_multiplier).min(2.0)
+                    }
+                } else {
+                    let flick_strength = (instantaneous_speed - 0.22).max(0.0) * accel_multiplier;
+                    (flick_strength * 2.5 + (lines as f32) * 0.6).min(10.0)
+                };
+                if boost > 0.0 {
+                    queue.velocity = (queue.velocity.max(0.0) + boost).min(40.0);
+                }
+            }
+        } else {
+            queue.velocity = 0.0;
+        }
+
+        // 6. Start frame drain if there are pending lines or inertial velocity
+        let should_start_drain = (queue.pending_lines > 0
+            || (tab.scroll_inertia && queue.velocity.abs() > 0.08))
+            && !queue.is_draining;
+        if should_start_drain {
+            queue.is_draining = true;
+        }
+
+        let mut effect = MouseEffect::default();
+        if immediate_lines > 0 {
+            effect = Self::execute_scroll_step_up(tab, point, immediate_lines, client_id)?;
+        }
+
+        if should_start_drain {
+            let _ = tab
+                .senders
+                .send_to_background_jobs(BackgroundJob::DrainSmoothScrollQueue { client_id });
+        }
+
+        Ok(effect)
+    }
+
+    pub(crate) fn execute_scroll_step_down(
         tab: &mut Tab,
         point: &Position,
         lines: usize,
@@ -1725,10 +1848,11 @@ impl MouseHandler {
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
             if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
-                tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
-                    .with_context(err_context)?;
+                for _ in 0..lines {
+                    tab.write_to_terminal_at(mouse_event.clone().into_bytes(), point, client_id)
+                        .with_context(err_context)?;
+                }
             } else if pane.is_alternate_mode_active() {
-                // separate writes so each sequence gets adjusted for cursor keys mode
                 for _ in 0..lines {
                     tab.write_to_terminal_at("\u{1b}[B".as_bytes().to_owned(), point, client_id)
                         .with_context(err_context)?;
@@ -1801,6 +1925,128 @@ impl MouseHandler {
             }
         }
         Ok(MouseEffect::default())
+    }
+
+    pub(crate) fn handle_scrollwheel_down(
+        tab: &mut Tab,
+        point: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<MouseEffect> {
+        let is_test = cfg!(test);
+        let now = std::time::Instant::now();
+
+        let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
+        queue.last_position = *point;
+
+        let dt = now.duration_since(queue.last_event_time).as_millis();
+        queue.last_event_time = now;
+
+        // 1. Opposing direction check:
+        let was_opposing = queue.velocity > 0.01 || queue.scroll_direction == 1;
+        if was_opposing {
+            queue.velocity = 0.0;
+            queue.fractional_step = 0.0;
+            queue.pending_lines = 0;
+            queue.is_draining = false;
+        }
+        queue.scroll_direction = -1;
+
+        let instantaneous_speed = (lines as f32 * 14.0) / (dt.max(4) as f32);
+        let prev_speed = queue.prev_instantaneous_speed;
+        queue.prev_instantaneous_speed = instantaneous_speed;
+
+        // Slow grab check: slow movement halts any active fling/drain immediately
+        let is_slow_grab = dt >= 80 || instantaneous_speed < 0.22;
+        if queue.is_draining && !was_opposing && is_slow_grab {
+            queue.velocity = 0.0;
+            queue.fractional_step = 0.0;
+            queue.pending_lines = 0;
+            queue.is_draining = false;
+        }
+
+        // 2. Acceleration calculation:
+        //    Small / isolated scroll inputs (dt >= 100ms or event rate <= 35 Hz) scroll strictly 1:1.
+        //    Continuous rapid swipes smoothly ramp speed_scale up to scroll_acceleration_factor.
+        let speed_scale = if tab.scroll_acceleration_factor > 1.0 && dt < 100 {
+            let fps_rate = 1000.0 / (dt.max(4) as f32);
+            let excess_speed = ((fps_rate - 35.0) / 65.0).clamp(0.0, 1.0);
+            1.0 + (tab.scroll_acceleration_factor - 1.0) * excess_speed
+        } else {
+            1.0
+        };
+
+        // 3. Accumulate lines to scroll
+        let lines_to_step = (lines as f32 * speed_scale) + queue.fractional_step;
+        let int_lines = lines_to_step.floor() as usize;
+        queue.fractional_step = lines_to_step - int_lines as f32;
+
+        if is_test {
+            return Self::execute_scroll_step_down(tab, point, lines, client_id);
+        }
+
+        // 4. Animate / step lines:
+        //    Add newly requested lines to pending_lines first, then immediately step
+        //    ~2/3 of the combined queue ((n * 2 + 1) / 3) so gentle 1-2 line ticks
+        //    still step 1 line at a time while rapid incoming events immediately
+        //    flush accumulated backlog.
+        queue.pending_lines += int_lines;
+        let immediate_lines = if queue.pending_lines == 0 {
+            0
+        } else {
+            ((queue.pending_lines * 2 + 1) / 3)
+                .max(1)
+                .min(queue.pending_lines)
+        };
+        queue.pending_lines -= immediate_lines;
+
+        // 5. Inertia fling handling (only when scroll_inertia is true)
+        if tab.scroll_inertia {
+            let accel_multiplier = (tab.scroll_acceleration_factor / 3.5).max(0.1);
+            let gesture_is_accelerating = instantaneous_speed > prev_speed + 0.05;
+            let is_flick = dt < 80 && instantaneous_speed >= 0.28 && tab.scroll_acceleration_factor > 1.0;
+            let current_velocity = (-queue.velocity).max(0.0);
+
+            if is_flick {
+                let boost = if current_velocity > 0.3 {
+                    if gesture_is_accelerating || instantaneous_speed > current_velocity {
+                        let diff = (instantaneous_speed - current_velocity).max(0.0);
+                        (diff * 1.5 + (lines as f32) * 0.8).min(8.0) * accel_multiplier
+                    } else {
+                        (0.5 * accel_multiplier).min(2.0)
+                    }
+                } else {
+                    let flick_strength = (instantaneous_speed - 0.22).max(0.0) * accel_multiplier;
+                    (flick_strength * 2.5 + (lines as f32) * 0.6).min(10.0)
+                };
+                if boost > 0.0 {
+                    queue.velocity = (queue.velocity.min(0.0) - boost).max(-40.0);
+                }
+            }
+        } else {
+            queue.velocity = 0.0;
+        }
+
+        // 6. Start frame drain if there are pending lines or inertial velocity
+        let should_start_drain = (queue.pending_lines > 0
+            || (tab.scroll_inertia && queue.velocity.abs() > 0.08))
+            && !queue.is_draining;
+        if should_start_drain {
+            queue.is_draining = true;
+        }
+
+        let mut effect = MouseEffect::default();
+        if immediate_lines > 0 {
+            effect = Self::execute_scroll_step_down(tab, point, immediate_lines, client_id)?;
+        }
+
+        if should_start_drain {
+            let _ = tab
+                .senders
+                .send_to_background_jobs(BackgroundJob::DrainSmoothScrollQueue { client_id });
+        }
+
+        Ok(effect)
     }
 
     fn handle_resize_scroll_up(
