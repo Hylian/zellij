@@ -222,9 +222,9 @@ pub mod action {
         CloseTab(super::CloseTabAction),
         #[prost(message, tag="47")]
         GoToTab(super::GoToTabAction),
-        #[prost(message, tag="70")]
+        #[prost(message, tag="48")]
         GoToTabName(super::GoToTabNameAction),
-        #[prost(message, tag="71")]
+        #[prost(message, tag="49")]
         ToggleTab(super::ToggleTabAction),
         #[prost(message, tag="50")]
         TabNameInput(super::TabNameInputAction),
