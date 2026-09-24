@@ -1603,22 +1603,19 @@ impl MouseHandler {
         }
 
         // 4. Animate / step lines:
-        //    For small queues (pending_lines <= 2), step 1 line immediately.
-        //    When the queue is congested, scale immediate steps to prevent animation backlog.
-        let immediate_lines = if int_lines == 0 {
+        //    Add newly requested lines to pending_lines first, then immediately step
+        //    ~2/3 of the combined queue ((n * 2 + 1) / 3) so gentle 1-2 line ticks
+        //    still step 1 line at a time while rapid incoming events immediately
+        //    flush accumulated backlog.
+        queue.pending_lines += int_lines;
+        let immediate_lines = if queue.pending_lines == 0 {
             0
         } else {
-            match queue.pending_lines {
-                0..=2 => 1,
-                3..=6 => 2,
-                _ => 3,
-            }
-            .min(int_lines)
+            ((queue.pending_lines * 2 + 1) / 3)
+                .max(1)
+                .min(queue.pending_lines)
         };
-        let to_buffer = int_lines.saturating_sub(immediate_lines);
-        if to_buffer > 0 {
-            queue.pending_lines += to_buffer;
-        }
+        queue.pending_lines -= immediate_lines;
 
         // 5. Inertia fling handling (only when scroll_inertia is true)
         if tab.scroll_inertia {
@@ -1765,22 +1762,19 @@ impl MouseHandler {
         }
 
         // 4. Animate / step lines:
-        //    For small queues (pending_lines <= 2), step 1 line immediately.
-        //    When the queue is congested, scale immediate steps to prevent animation backlog.
-        let immediate_lines = if int_lines == 0 {
+        //    Add newly requested lines to pending_lines first, then immediately step
+        //    ~2/3 of the combined queue ((n * 2 + 1) / 3) so gentle 1-2 line ticks
+        //    still step 1 line at a time while rapid incoming events immediately
+        //    flush accumulated backlog.
+        queue.pending_lines += int_lines;
+        let immediate_lines = if queue.pending_lines == 0 {
             0
         } else {
-            match queue.pending_lines {
-                0..=2 => 1,
-                3..=6 => 2,
-                _ => 3,
-            }
-            .min(int_lines)
+            ((queue.pending_lines * 2 + 1) / 3)
+                .max(1)
+                .min(queue.pending_lines)
         };
-        let to_buffer = int_lines.saturating_sub(immediate_lines);
-        if to_buffer > 0 {
-            queue.pending_lines += to_buffer;
-        }
+        queue.pending_lines -= immediate_lines;
 
         // 5. Inertia fling handling (only when scroll_inertia is true)
         if tab.scroll_inertia {

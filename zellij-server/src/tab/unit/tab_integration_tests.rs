@@ -11549,28 +11549,22 @@ fn test_multi_line_scroll_animates_one_line_at_a_time() {
     tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
         .unwrap();
 
-    // Set up 3 pending lines in queue
+    // Set up 2 pending lines in queue (1-line-at-a-time micro-smoothing threshold)
     {
         let queue = tab.smooth_scroll_queues.entry(client_id).or_default();
-        queue.pending_lines = 3;
+        queue.pending_lines = 2;
         queue.scroll_direction = 1;
         queue.is_draining = true;
         queue.last_position = Position::new(10, 60);
     }
 
-    // First frame drains 1 line, leaving 2
-    let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
-    let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
-    assert_eq!(queue.pending_lines, 2);
-    assert!(queue.is_draining);
-
-    // Second frame drains 1 line, leaving 1
+    // First frame drains 1 line, leaving 1
     let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
     let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
     assert_eq!(queue.pending_lines, 1);
     assert!(queue.is_draining);
 
-    // Third frame drains last line, leaving 0 and stopping drain
+    // Second frame drains last line, leaving 0 and stopping drain
     let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
     let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
     assert_eq!(queue.pending_lines, 0);
@@ -11603,16 +11597,16 @@ fn test_congested_scroll_queue_steps_multiple_lines_to_prevent_delay() {
         queue.last_position = Position::new(10, 60);
     }
 
-    // When pending_lines is 10 (8..=12), it drains 3 lines in a single frame to clear backlog
+    // When pending_lines is 10, it drains ((10 * 2 + 1) / 3) = 7 lines in a single frame
     let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
     let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
-    assert_eq!(queue.pending_lines, 7); // 10 - 3 = 7
+    assert_eq!(queue.pending_lines, 3); // 10 - 7 = 3
     assert!(queue.is_draining);
 
-    // When pending_lines is 7 (4..=7), it drains 2 lines in the next frame
+    // When pending_lines is 3, it drains ((3 * 2 + 1) / 3) = 2 lines in the next frame
     let _ = tab.drain_smooth_scroll_step(client_id).unwrap();
     let queue = tab.smooth_scroll_queues.get(&client_id).unwrap();
-    assert_eq!(queue.pending_lines, 5); // 7 - 2 = 5
+    assert_eq!(queue.pending_lines, 1); // 3 - 2 = 1
     assert!(queue.is_draining);
 }
 

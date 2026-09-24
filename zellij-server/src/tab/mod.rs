@@ -4700,20 +4700,14 @@ impl Tab {
 
                 if queue.pending_lines > 0 {
                     let dir = queue.scroll_direction;
-                    // Dynamically step more lines when the queue is congested to prevent animation delay:
-                    // - 1-3 lines pending: 1 line per frame (butter smooth)
-                    // - 4-7 lines pending: 2 lines per frame
-                    // - 8-12 lines pending: 3 lines per frame
-                    // - 13-18 lines pending: 4 lines per frame
-                    // - 19+ lines pending: proportional (drains in ~3-4 frames max)
-                    let lines_to_drain = match queue.pending_lines {
-                        0..=3 => 1,
-                        4..=7 => 2,
-                        8..=12 => 3,
-                        13..=18 => 4,
-                        n => (n / 4).max(5),
-                    }
-                    .min(queue.pending_lines);
+                    // Dynamically step ~2/3 of pending lines when the queue builds up so
+                    // gentle 1-2 line ticks still animate 1 line at a time while rapid
+                    // multi-line swipes catch up in 1-2 frames without lag:
+                    // - 1-2 lines pending: 1 line per frame (1-line-at-a-time micro-smoothing)
+                    // - 3+ lines pending: (n * 2 + 1) / 3 (~67% catch-up per step)
+                    let lines_to_drain = ((queue.pending_lines * 2 + 1) / 3)
+                        .max(1)
+                        .min(queue.pending_lines);
 
                     queue.pending_lines -= lines_to_drain;
                     let has_more = queue.pending_lines > 0
@@ -4729,14 +4723,7 @@ impl Tab {
 
                     let step = if queue.fractional_step >= 1.0 {
                         let int_lines = queue.fractional_step.floor() as usize;
-                        let lines_to_drain = match int_lines {
-                            0 => 0,
-                            1..=3 => 1,
-                            4..=7 => 2,
-                            8..=12 => 3,
-                            n => (n / 3).max(4),
-                        }
-                        .min(int_lines);
+                        let lines_to_drain = ((int_lines * 2 + 1) / 3).max(1).min(int_lines);
                         queue.fractional_step -= lines_to_drain as f32;
                         if lines_to_drain > 0 {
                             Some((dir, lines_to_drain))
