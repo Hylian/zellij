@@ -3532,6 +3532,17 @@ impl Grid {
         if !self.osc133_markers_seen {
             return None;
         }
+        let mut in_open_prompt = false;
+        if let Some(top_row) = self.row_at(0) {
+            for marker in &top_row.osc133_markers {
+                match marker.kind {
+                    Osc133MarkerKind::Prompt => in_open_prompt = true,
+                    Osc133MarkerKind::Input
+                    | Osc133MarkerKind::Output
+                    | Osc133MarkerKind::End(_) => in_open_prompt = false,
+                }
+            }
+        }
         let last_line = (self.viewport.len() + self.lines_below.len()) as isize - 1;
         for line in 1..=last_line {
             let Some(row) = self.row_at(line) else {
@@ -3539,11 +3550,21 @@ impl Grid {
             };
             for marker in row.osc133_markers.iter() {
                 match marker.kind {
-                    Osc133MarkerKind::Prompt | Osc133MarkerKind::Input => {
+                    Osc133MarkerKind::Prompt => {
                         let reachable_delta = (line as usize).min(self.lines_below.len());
                         return (reachable_delta > 0).then_some(reachable_delta);
                     },
-                    Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {},
+                    Osc133MarkerKind::Input => {
+                        if in_open_prompt {
+                            in_open_prompt = false;
+                        } else {
+                            let reachable_delta = (line as usize).min(self.lines_below.len());
+                            return (reachable_delta > 0).then_some(reachable_delta);
+                        }
+                    },
+                    Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {
+                        in_open_prompt = false;
+                    },
                 }
             }
         }
@@ -6150,6 +6171,8 @@ impl Row {
         parts
     }
     fn add_osc133_marker(&mut self, column: usize, kind: Osc133MarkerKind) {
+        self.osc133_markers
+            .retain(|m| std::mem::discriminant(&m.kind) != std::mem::discriminant(&kind));
         self.osc133_markers.push(Osc133Marker { column, kind });
         self.osc133_markers.sort_by_key(|marker| marker.column);
     }

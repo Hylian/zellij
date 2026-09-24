@@ -9281,21 +9281,25 @@ pub(crate) fn screen_thread_main(
                 screen.render(None)?;
             },
             ScreenInstruction::ScrollToPreviousPrompt(client_id, _completion_tx) => {
+                let was_scrolled = screen.active_pane_is_scrolled(client_id);
                 active_tab_and_connected_client_id!(
                     screen,
                     client_id,
                     |tab: &mut Tab, client_id: ClientId| tab
                         .scroll_active_terminal_to_previous_prompt(client_id)
                 );
+                screen.sync_scroll_mode_if_scroll_changed(client_id, was_scrolled)?;
                 screen.render(None)?;
             },
             ScreenInstruction::ScrollToNextPrompt(client_id, _completion_tx) => {
+                let was_scrolled = screen.active_pane_is_scrolled(client_id);
                 active_tab_and_connected_client_id!(
                     screen,
                     client_id,
                     |tab: &mut Tab, client_id: ClientId| tab
                         .scroll_active_terminal_to_next_prompt(client_id)
                 );
+                screen.sync_scroll_mode_if_scroll_changed(client_id, was_scrolled)?;
                 screen.render(None)?;
             },
             ScreenInstruction::SelectCommandAtScrollPosition(client_id, _completion_tx) => {
