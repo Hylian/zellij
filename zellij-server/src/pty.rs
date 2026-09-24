@@ -203,7 +203,8 @@ pub(crate) struct Pty {
     default_editor: Option<PathBuf>,
     post_command_discovery_hook: Option<String>,
     plugin_cwds: HashMap<u32, PathBuf>,   // plugin_id -> cwd
-    terminal_cwds: HashMap<u32, PathBuf>, // terminal_id -> cwd
+    terminal_cwds: HashMap<u32, PathBuf>, // terminal_id -> cwd (reported to plugins)
+    initial_terminal_cwds: HashMap<u32, PathBuf>, // terminal_id -> fork-time cwd fallback
     pane_activity_flags: HashMap<u32, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     terminal_cmds: HashMap<u32, Vec<String>>,
     terminal_foreground_cmds: HashMap<u32, Vec<String>>,
@@ -922,6 +923,7 @@ impl Pty {
             post_command_discovery_hook,
             plugin_cwds: HashMap::new(),
             terminal_cwds: HashMap::new(),
+            initial_terminal_cwds: HashMap::new(),
             pane_activity_flags: HashMap::new(),
             terminal_cmds: HashMap::new(),
             terminal_foreground_cmds: HashMap::new(),
@@ -988,6 +990,7 @@ impl Pty {
                                     .and_then(|input| input.get_cwd(pid))
                             })
                             .or_else(|| self.terminal_cwds.get(id).cloned())
+                            .or_else(|| self.initial_terminal_cwds.get(id).cloned())
                     },
                 })
         };
@@ -1010,6 +1013,7 @@ impl Pty {
                                 .and_then(|input| input.get_cwd(pid))
                         })
                         .or_else(|| self.terminal_cwds.get(terminal_pane_id).cloned())
+                        .or_else(|| self.initial_terminal_cwds.get(terminal_pane_id).cloned())
                 },
                 PaneId::Plugin(plugin_id) => self.plugin_cwds.get(plugin_id).cloned(),
             };
@@ -1313,7 +1317,12 @@ impl Pty {
         .or_else(|| {
             new_tab_pane_ids
                 .first()
-                .and_then(|(term_id, _)| self.terminal_cwds.get(term_id).cloned())
+                .and_then(|(term_id, _)| {
+                    self.terminal_cwds
+                        .get(term_id)
+                        .or_else(|| self.initial_terminal_cwds.get(term_id))
+                        .cloned()
+                })
         });
         self.bus
             .senders
@@ -1825,6 +1834,7 @@ impl Pty {
                 }
                 self.pane_activity_flags.remove(&id);
                 self.terminal_cwds.remove(&id);
+                self.initial_terminal_cwds.remove(&id);
                 self.terminal_cmds.remove(&id);
                 self.terminal_foreground_cmds.remove(&id);
                 self.bus
@@ -2029,6 +2039,7 @@ impl Pty {
                                     .and_then(|input| input.get_cwd(pid))
                             })
                             .or_else(|| self.terminal_cwds.get(id).cloned())
+                            .or_else(|| self.initial_terminal_cwds.get(id).cloned())
                     },
                 })
         };
@@ -2068,7 +2079,7 @@ impl Pty {
     fn capture_initial_cwd(&mut self, terminal_id: u32, child_pid: u32) {
         if let Some(os_input) = self.bus.os_input.as_ref() {
             if let Some(cwd) = os_input.get_cwd(child_pid) {
-                self.terminal_cwds.insert(terminal_id, cwd);
+                self.initial_terminal_cwds.insert(terminal_id, cwd);
             }
         }
     }
@@ -2329,24 +2340,23 @@ impl Pty {
     pub fn get_pane_cwd(&self, pane_id: PaneId) -> GetPaneCwdResponse {
         match pane_id {
             PaneId::Terminal(terminal_id) => {
-                if let Some(&child_pid) = self.id_to_child_pid.get(&terminal_id) {
-                    // Query OS for current working directory
-                    if let Some(os_input) = self.bus.os_input.as_ref() {
-                        let (cwds, _cmds) = os_input.get_cwds(vec![child_pid]);
-                        if let Some(cwd) = cwds.get(&child_pid) {
-                            GetPaneCwdResponse::Ok(cwd.clone())
-                        } else {
-                            GetPaneCwdResponse::Err(format!(
-                                "Could not retrieve CWD for terminal pane {}",
-                                terminal_id
-                            ))
-                        }
-                    } else {
-                        GetPaneCwdResponse::Err("OS input not available".to_string())
-                    }
+                let os_cwd = self
+                    .id_to_child_pid
+                    .get(&terminal_id)
+                    .and_then(|&child_pid| {
+                        self.bus
+                            .os_input
+                            .as_ref()
+                            .and_then(|os_input| os_input.get_cwd(child_pid))
+                    });
+                if let Some(cwd) = os_cwd
+                    .or_else(|| self.terminal_cwds.get(&terminal_id).cloned())
+                    .or_else(|| self.initial_terminal_cwds.get(&terminal_id).cloned())
+                {
+                    GetPaneCwdResponse::Ok(cwd)
                 } else {
                     GetPaneCwdResponse::Err(format!(
-                        "Terminal pane {} not found or not running",
+                        "Could not retrieve CWD for terminal pane {}",
                         terminal_id
                     ))
                 }

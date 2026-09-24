@@ -477,3 +477,27 @@ fn osc7_then_poll_skips_terminal() {
         "poll after osc7 should skip terminal since flag was cleared"
     );
 }
+
+#[test]
+fn capture_initial_cwd_does_not_suppress_first_osc7_or_poll_event() {
+    let mock = MockOsApi::new();
+    let child_pid = 100;
+    mock.set_cwd(child_pid, PathBuf::from("/initial/repo"));
+    let (mut pty, rx) = make_pty_with_plugin_receiver(mock);
+    set_active_terminal(&mut pty, 1, child_pid);
+
+    // Capturing initial CWD at fork time provides fallback without marking as reported to plugins
+    pty.capture_initial_cwd(1, child_pid);
+    assert_eq!(
+        pty.initial_terminal_cwds.get(&1),
+        Some(&PathBuf::from("/initial/repo"))
+    );
+
+    // First OSC7 prompt notification from shell must still emit Event::CwdChanged to plugins
+    pty.notify_cwd_from_osc7(1, PathBuf::from("/initial/repo"));
+    let events = collect_cwd_changed_events(&rx);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].0, PaneId::Terminal(1));
+    assert_eq!(events[0].1, PathBuf::from("/initial/repo"));
+}
+
