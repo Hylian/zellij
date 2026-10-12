@@ -513,6 +513,8 @@ fn test_client_messages() {
                 host_notification_protocol: Some(HostNotificationProtocol::Osc99),
                 nested_session_handling: Some(NestedSessionHandling::Fullscreen),
                 dangerously_enable_paste_buffer_read: Some(true),
+                scroll_acceleration_factor: Some(3.5),
+                scroll_inertia: Some(true),
             }),
             layout: None,
             terminal_window_size: Size { rows: 80, cols: 42 },

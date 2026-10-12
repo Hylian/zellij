@@ -1226,6 +1226,8 @@ message Options {
   optional string host_notification_protocol = 67;
   optional bool scroll_mode_sync = 68;
   optional ThemeHue explicit_theme_hue = 69;
+  optional float scroll_acceleration_factor = 70;
+  optional bool scroll_inertia = 71;
 }
 
 enum OnForceClose {

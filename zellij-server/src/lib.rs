@@ -499,6 +499,14 @@ impl SessionMetaData {
                         .options
                         .nested_session_handling
                         .unwrap_or_default(),
+                    scroll_acceleration_factor: new_config
+                        .options
+                        .scroll_acceleration_factor
+                        .unwrap_or(3.5),
+                    scroll_inertia: new_config
+                        .options
+                        .scroll_inertia
+                        .unwrap_or(true),
                 })
                 .unwrap();
             self.senders
