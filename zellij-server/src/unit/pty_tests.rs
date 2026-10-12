@@ -647,3 +647,54 @@ fn resurrect_command_for_unknown_terminal_is_rejected() {
     assert!(result.is_err());
     assert!(pty.resurrect_commands.is_empty());
 }
+
+#[test]
+fn capture_initial_cwd_does_not_suppress_first_osc7_or_poll_event() {
+    use zellij_utils::data::GetPaneCwdResponse;
+
+    let mock = MockOsApi::new();
+    mock.set_cwd(100, PathBuf::from("/initial/osc7"));
+    mock.set_cwd(200, PathBuf::from("/initial/polled"));
+    let (mut pty, rx) = make_pty_with_plugin_receiver(mock.clone());
+    set_active_terminal(&mut pty, 1, 100);
+    set_active_terminal(&mut pty, 2, 200);
+
+    // Capturing initial CWD at fork time provides fallback without marking as reported to plugins
+    pty.capture_initial_cwd(1, 100);
+    pty.capture_initial_cwd(2, 200);
+    assert_eq!(
+        pty.initial_terminal_cwds.get(&1),
+        Some(&PathBuf::from("/initial/osc7"))
+    );
+    assert_eq!(
+        pty.initial_terminal_cwds.get(&2),
+        Some(&PathBuf::from("/initial/polled"))
+    );
+
+    // Fallback works even if live OS CWD query later stops resolving (e.g. held/exited pane)
+    mock.cwds.lock().unwrap().remove(&100);
+    assert_eq!(
+        pty.get_pane_cwd(PaneId::Terminal(1)),
+        GetPaneCwdResponse::Ok(PathBuf::from("/initial/osc7"))
+    );
+    assert_eq!(
+        pty.get_pane_cwd(PaneId::Terminal(999)),
+        GetPaneCwdResponse::Err("Terminal pane 999 not found or not running".to_string())
+    );
+
+    // 1. First OSC7 prompt notification must still emit Event::CwdChanged to plugins
+    pty.notify_cwd_from_osc7(1, PathBuf::from("/initial/osc7"));
+    let events = collect_cwd_changed_events(&rx);
+    assert_eq!(
+        events,
+        vec![(PaneId::Terminal(1), PathBuf::from("/initial/osc7"))]
+    );
+
+    // 2. First periodic poll via update_and_report_cwds must also emit Event::CwdChanged
+    pty.update_and_report_cwds();
+    let poll_events = collect_cwd_changed_events(&rx);
+    assert_eq!(
+        poll_events,
+        vec![(PaneId::Terminal(2), PathBuf::from("/initial/polled"))]
+    );
+}
