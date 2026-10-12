@@ -285,3 +285,25 @@ fn tcgetpgrp_returns_foreground_group() {
         let _ = server.force_kill(child_pid);
     }
 }
+
+#[cfg(not(windows))]
+#[test]
+fn close_fds_fast_closes_high_fds() {
+    use crate::os_input_output_unix::close_fds_fast;
+
+    // Duplicate stdin onto a high descriptor (>= 1024) and verify close_fds_fast closes it.
+    let high_fd = unsafe { libc::fcntl(0, libc::F_DUPFD, 1024) };
+    assert!(high_fd >= 1024, "failed to dup fd >= 1024: {high_fd}");
+    assert!(
+        unsafe { libc::fcntl(high_fd, libc::F_GETFD) } >= 0,
+        "high_fd should be open before close_fds_fast"
+    );
+
+    close_fds_fast(high_fd as usize);
+
+    assert_eq!(
+        unsafe { libc::fcntl(high_fd, libc::F_GETFD) },
+        -1,
+        "high_fd should be closed after close_fds_fast"
+    );
+}
