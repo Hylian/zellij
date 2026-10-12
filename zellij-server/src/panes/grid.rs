@@ -3502,6 +3502,7 @@ impl Grid {
             return None;
         }
         let first_line = -(self.lines_above.len() as isize);
+        let mut prompt_candidate: Option<usize> = None;
         let mut input_candidate: Option<usize> = None;
         let mut display_delta = 0;
         for line in (first_line..0).rev() {
@@ -3511,26 +3512,42 @@ impl Grid {
             display_delta += calculate_row_display_height(row.width(), self.width);
             for marker in row.osc133_markers.iter().rev() {
                 match marker.kind {
-                    Osc133MarkerKind::Prompt => return Some(display_delta),
+                    Osc133MarkerKind::Prompt => {
+                        prompt_candidate = Some(display_delta);
+                    },
                     Osc133MarkerKind::Input => {
+                        if let Some(candidate) = prompt_candidate {
+                            return Some(candidate);
+                        }
                         if input_candidate.is_none() {
                             input_candidate = Some(display_delta);
                         }
                     },
                     Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {
-                        if let Some(candidate) = input_candidate {
+                        if let Some(candidate) = prompt_candidate.or(input_candidate) {
                             return Some(candidate);
                         }
                     },
                 }
             }
         }
-        input_candidate
+        prompt_candidate.or(input_candidate)
     }
 
     fn next_prompt_line_delta(&self) -> Option<usize> {
         if !self.osc133_markers_seen {
             return None;
+        }
+        let mut in_open_prompt = false;
+        if let Some(top_row) = self.row_at(0) {
+            for marker in &top_row.osc133_markers {
+                match marker.kind {
+                    Osc133MarkerKind::Prompt => in_open_prompt = true,
+                    Osc133MarkerKind::Input
+                    | Osc133MarkerKind::Output
+                    | Osc133MarkerKind::End(_) => in_open_prompt = false,
+                }
+            }
         }
         let last_line = (self.viewport.len() + self.lines_below.len()) as isize - 1;
         for line in 1..=last_line {
@@ -3539,11 +3556,23 @@ impl Grid {
             };
             for marker in row.osc133_markers.iter() {
                 match marker.kind {
-                    Osc133MarkerKind::Prompt | Osc133MarkerKind::Input => {
-                        let reachable_delta = (line as usize).min(self.lines_below.len());
-                        return (reachable_delta > 0).then_some(reachable_delta);
+                    Osc133MarkerKind::Prompt => {
+                        if !in_open_prompt {
+                            let reachable_delta = (line as usize).min(self.lines_below.len());
+                            return (reachable_delta > 0).then_some(reachable_delta);
+                        }
                     },
-                    Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {},
+                    Osc133MarkerKind::Input => {
+                        if in_open_prompt {
+                            in_open_prompt = false;
+                        } else {
+                            let reachable_delta = (line as usize).min(self.lines_below.len());
+                            return (reachable_delta > 0).then_some(reachable_delta);
+                        }
+                    },
+                    Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {
+                        in_open_prompt = false;
+                    },
                 }
             }
         }
@@ -5746,6 +5775,7 @@ enum Osc133MarkerKind {
 struct Osc133Marker {
     column: usize,
     kind: Osc133MarkerKind,
+    overwrite_protected: bool,
 }
 
 impl Debug for Row {
@@ -5900,7 +5930,11 @@ impl Row {
                 let overwrite_end =
                     overwrite_start + character_width.max(self.columns[absolute_x_index].width());
                 let replacing_blank = self.columns[absolute_x_index].character == ' ';
-                self.osc133_markers.retain(|marker| {
+                self.osc133_markers.retain_mut(|marker| {
+                    if marker.column == overwrite_start && marker.overwrite_protected {
+                        marker.overwrite_protected = false;
+                        return true;
+                    }
                     marker.column < overwrite_start
                         || marker.column >= overwrite_end
                         || (replacing_blank && marker.column == overwrite_start)
@@ -6150,7 +6184,32 @@ impl Row {
         parts
     }
     fn add_osc133_marker(&mut self, column: usize, kind: Osc133MarkerKind) {
-        self.osc133_markers.push(Osc133Marker { column, kind });
+        let overwrite_protected = column < self.width();
+        let last_command_boundary = self.osc133_markers.iter().rposition(|m| {
+            matches!(
+                m.kind,
+                Osc133MarkerKind::Output | Osc133MarkerKind::End(_)
+            )
+        });
+        let open_prompt_start = last_command_boundary.map_or(0, |idx| idx + 1);
+        let mut index = 0;
+        self.osc133_markers.retain(|m| {
+            let keep = if matches!(kind, Osc133MarkerKind::Prompt) && index >= open_prompt_start {
+                !matches!(m.kind, Osc133MarkerKind::Prompt | Osc133MarkerKind::Input)
+            } else if matches!(kind, Osc133MarkerKind::Input) && index >= open_prompt_start {
+                !matches!(m.kind, Osc133MarkerKind::Input)
+            } else {
+                !(m.column == column
+                    && std::mem::discriminant(&m.kind) == std::mem::discriminant(&kind))
+            };
+            index += 1;
+            keep
+        });
+        self.osc133_markers.push(Osc133Marker {
+            column,
+            kind,
+            overwrite_protected,
+        });
         self.osc133_markers.sort_by_key(|marker| marker.column);
     }
     pub fn last_index_in_line(&self) -> usize {

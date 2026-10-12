@@ -9360,9 +9360,7 @@ fn csi_k_parameterless_clears_from_cursor_to_end_of_line() {
     let mut parser = vte::Parser::new();
     let mut grid = create_grid_with_size_and_raw(10, 40, &[]);
     // Write "hello world", move cursor to col 5 (after "hello"), send parameter-less \e[K
-    for byte in b"hello world\x1b[1;6H\x1b[K" {
-        parser.advance(&mut grid, *byte);
-    }
+    parser.advance(&mut grid, b"hello world\x1b[1;6H\x1b[K");
     let vp = viewport_texts(&grid);
     assert_eq!(vp[0], "hello");
 }
@@ -9372,11 +9370,55 @@ fn csi_j_parameterless_clears_below_cursor() {
     let mut parser = vte::Parser::new();
     let mut grid = create_grid_with_size_and_raw(10, 40, &[]);
     // Fill 3 lines, move cursor to line 2 (1-indexed), send parameter-less \e[J
-    for byte in b"line1\r\nline2\r\nline3\x1b[2;1H\x1b[J" {
-        parser.advance(&mut grid, *byte);
-    }
+    parser.advance(&mut grid, b"line1\r\nline2\r\nline3\x1b[2;1H\x1b[J");
     let vp = viewport_texts(&grid);
     assert_eq!(vp[0], "line1");
     assert_eq!(vp[1], "");
     assert_eq!(vp[2], "");
+}
+
+#[test]
+fn osc133_multiline_prompt_scroll_navigation_jumps_per_logical_prompt() {
+    let mut content: Vec<u8> = Vec::new();
+    for i in 1..=3 {
+        content.extend_from_slice(
+            format!(
+                "\x1b]133;A\x07~/dir-{i}\r\n\x1b]133;A\x07$ \x1b]133;B\x07cmd-{i}\x1b]133;C\x07\r\nout-{i}a\r\nout-{i}b\r\nout-{i}c\x1b]133;D;0\x07\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    content.extend_from_slice(b"\x1b]133;A\x07~/dir-4\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+    let mut grid = create_grid_with_size_and_raw(5, 40, &content);
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-3");
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-2");
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-1");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-2");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-3");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert!(!grid.is_scrolled);
+}
+
+#[test]
+fn osc133_inplace_prompt_redraw_deduplicates_open_prompt_markers() {
+    let mut grid = create_grid_with_content(
+        "\x1b]133;A\x07$ \x1b]133;B\x07\r\x1b]133;A\x07[venv] $ \x1b]133;B\x07echo ok\x1b]133;C\x07\r\nok\x1b]133;D;0\x07",
+    );
+
+    assert_eq!(grid.viewport[0].osc133_markers.len(), 3);
+    assert_eq!(
+        select_with_click_count(&mut grid, Position::new(1, 0), 3),
+        "echo ok\nok"
+    );
 }

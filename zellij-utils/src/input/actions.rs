@@ -1062,6 +1062,12 @@ impl Action {
                 },
                 None => Ok(vec![Action::HalfPageScrollDown]),
             },
+            CliAction::ScrollToPreviousPrompt => Ok(vec![Action::ScrollToPreviousPrompt]),
+            CliAction::ScrollToNextPrompt => Ok(vec![Action::ScrollToNextPrompt]),
+            CliAction::SelectCommandAtScrollPosition => {
+                Ok(vec![Action::SelectCommandAtScrollPosition])
+            },
+            CliAction::CopyLastCommandOutput => Ok(vec![Action::CopyLastCommandOutput]),
             CliAction::ToggleFullscreen { pane_id } => match pane_id {
                 Some(pane_id_str) => {
                     let pane_id = PaneId::from_str(&pane_id_str)
