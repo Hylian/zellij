@@ -563,6 +563,14 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::LinkHints => {
+            senders
+                .send_to_screen(ScreenInstruction::LinkHints(
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
         Action::ScrollUpAt { position } => {
             senders
                 .send_to_screen(ScreenInstruction::ScrollUpAt(
@@ -2334,6 +2342,36 @@ pub(crate) fn route_thread_main(
                                 .write()
                                 .unwrap()
                                 .set_last_active_client(client_id);
+
+                            let link_hint_senders =
+                                session_data.read().unwrap().as_ref().and_then(|s| {
+                                    let active = s
+                                        .link_hints_clients
+                                        .lock()
+                                        .map(|set| set.contains(&client_id))
+                                        .unwrap_or(false);
+                                    if active {
+                                        Some(s.senders.clone())
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some(senders) = link_hint_senders {
+                                let (completion_tx, completion_rx) = oneshot::channel();
+                                if let Err(e) =
+                                    senders.send_to_screen(ScreenInstruction::LinkHintKey(
+                                        client_id,
+                                        Some(key),
+                                        raw_bytes,
+                                        Some(NotificationEnd::new(completion_tx)),
+                                    ))
+                                {
+                                    log::error!("{}", e);
+                                } else {
+                                    wait_for_action_completion(completion_rx, "LinkHintKey", false);
+                                }
+                                return Ok(should_break);
+                            }
 
                             // The read guard ends as a temporary in this expression so
                             // `route_action` runs without holding `session_data.read()` —

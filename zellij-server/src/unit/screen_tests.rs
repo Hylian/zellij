@@ -457,6 +457,7 @@ impl MockScreen {
         )
         .should_silently_fail();
         let debug = false;
+        let link_hints_clients = self.session_metadata.link_hints_clients.clone();
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
@@ -468,6 +469,7 @@ impl MockScreen {
                     config,
                     debug,
                     Box::new(Layout::default()),
+                    link_hints_clients,
                 )
                 .expect("TEST")
             })
@@ -544,6 +546,7 @@ impl MockScreen {
         )
         .should_silently_fail();
         let debug = false;
+        let link_hints_clients = self.session_metadata.link_hints_clients.clone();
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
@@ -555,6 +558,7 @@ impl MockScreen {
                     config,
                     debug,
                     Box::new(Layout::default()),
+                    link_hints_clients,
                 )
                 .expect("TEST")
             })
@@ -731,6 +735,7 @@ impl MockScreen {
             web_sharing: WebSharing::Off,
             config_file_path: self.session_metadata.config_file_path.clone(),
             key_passthrough_clients: self.session_metadata.key_passthrough_clients.clone(),
+            link_hints_clients: self.session_metadata.link_hints_clients.clone(),
         }
     }
 }
@@ -785,6 +790,7 @@ impl MockScreen {
             web_sharing: WebSharing::Off,
             config_file_path: None,
             key_passthrough_clients: Default::default(),
+            link_hints_clients: Default::default(),
         };
 
         let os_input = FakeInputOutput::default();

@@ -289,6 +289,7 @@ message Action {
     ScrollToNextPromptAction scroll_to_next_prompt = 149;
     SelectCommandAtScrollPositionAction select_command_at_scroll_position = 150;
     CopyLastCommandOutputAction copy_last_command_output = 151;
+    LinkHintsAction link_hints = 152;
   }
 }
 
@@ -318,6 +319,7 @@ message ScrollToPreviousPromptAction {}
 message ScrollToNextPromptAction {}
 message SelectCommandAtScrollPositionAction {}
 message CopyLastCommandOutputAction {}
+message LinkHintsAction {}
 message PageScrollUpAction {}
 message PageScrollDownAction {}
 message HalfPageScrollUpAction {}

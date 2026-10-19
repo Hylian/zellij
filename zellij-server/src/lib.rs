@@ -339,6 +339,7 @@ pub(crate) struct SessionMetaData {
     pub current_input_modes: HashMap<ClientId, InputMode>,
     pub session_configuration: SessionConfiguration,
     pub key_passthrough_clients: HashMap<ClientId, PaneId>,
+    pub link_hints_clients: Arc<std::sync::Mutex<HashSet<ClientId>>>,
     pub web_sharing: WebSharing, // this is a special attribute explicitly set on session
     // initialization because we don't want it to be overridden by
     // configuration changes, the only way it can be overwritten is by
@@ -2142,6 +2143,8 @@ fn init_session(
 
     let default_mode = config_options.default_mode.unwrap_or_default();
     let default_keybinds = config.keybinds.clone();
+    let link_hints_clients: Arc<std::sync::Mutex<HashSet<ClientId>>> =
+        Arc::new(std::sync::Mutex::new(HashSet::new()));
 
     let pty_thread = thread::Builder::new()
         .name("pty".to_string())
@@ -2187,6 +2190,7 @@ fn init_session(
             let debug = cli_assets.is_debug;
             let layout = layout.clone();
             let config = config.clone();
+            let link_hints_clients = link_hints_clients.clone();
             move || {
                 screen_thread_main(
                     screen_bus,
@@ -2195,6 +2199,7 @@ fn init_session(
                     config,
                     debug,
                     layout,
+                    link_hints_clients,
                 )
                 .fatal();
             }
@@ -2348,6 +2353,7 @@ fn init_session(
         #[cfg(not(feature = "web_server_capability"))]
         web_sharing: WebSharing::Disabled,
         key_passthrough_clients: HashMap::new(),
+        link_hints_clients,
         config_file_path: cli_assets.config_file_path,
     }
 }

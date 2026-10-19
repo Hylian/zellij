@@ -279,6 +279,8 @@ pub enum ScreenContext {
     SelectCommandAtScrollPosition,
     CopyLastCommandOutput,
     ClearCommandOutputFlash,
+    LinkHints,
+    LinkHintKey,
     PageScrollUp,
     PageScrollDown,
     HalfPageScrollUp,

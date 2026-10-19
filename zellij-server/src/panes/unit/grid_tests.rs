@@ -9422,3 +9422,116 @@ fn osc133_inplace_prompt_redraw_deduplicates_open_prompt_markers() {
         "echo ok\nok"
     );
 }
+
+#[test]
+fn link_hints_generate_prefix_free_labels() {
+    use super::generate_hint_labels;
+    let small = generate_hint_labels(5);
+    assert_eq!(small, vec!["a", "s", "d", "f", "g"]);
+
+    let large = generate_hint_labels(40);
+    assert_eq!(large.len(), 40);
+    for (i, a) in large.iter().enumerate() {
+        for (j, b) in large.iter().enumerate() {
+            if i != j {
+                assert!(
+                    !b.starts_with(a),
+                    "label {a:?} is a prefix of {b:?} in {large:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn link_hints_collects_existing_files_and_osc8_and_ignores_nonexistent() {
+    let cargo_toml = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    assert!(cargo_toml.is_file());
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let content = format!(
+        "real: {}:42:7 fake: /nonexistent/fake_path_12345.rs:10\r\n\
+         rg: Cargo.toml:15:name = \"zellij-server\"\r\n\
+         osc8: \x1b]8;;file://localhost{}#L99\x1b\\linked-cargo\x1b]8;;\x1b\\",
+        cargo_toml.display(),
+        cargo_toml.display()
+    );
+    let mut grid = create_grid_with_size_and_raw(6, 120, content.as_bytes());
+    grid.set_current_cwd(manifest_dir);
+
+    let candidates = grid.collect_link_hint_candidates();
+    assert_eq!(candidates.len(), 3, "candidates: {candidates:?}");
+    assert_eq!(candidates[0].path, cargo_toml);
+    assert_eq!(candidates[0].line_number, Some(42));
+    assert_eq!(candidates[1].path, cargo_toml);
+    assert_eq!(candidates[1].line_number, Some(15));
+    assert_eq!(candidates[2].path, cargo_toml);
+    assert_eq!(candidates[2].line_number, Some(99));
+}
+
+#[test]
+fn link_hints_key_selection_and_render_reset_styles() {
+    use super::{LinkHintAction, LinkHintTarget};
+    use zellij_utils::data::{BareKey, KeyWithModifier};
+
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cargo_toml = manifest_dir.join("Cargo.toml");
+    let content = "check Cargo.toml:12 trailing text";
+    let mut grid = create_grid_with_size_and_raw(4, 100, content.as_bytes());
+    grid.set_current_cwd(manifest_dir);
+    let candidates = grid.collect_link_hint_candidates();
+    assert_eq!(candidates.len(), 1);
+
+    let targets = vec![LinkHintTarget {
+        label: "as".to_string(),
+        start_row: candidates[0].start_row,
+        start_col: candidates[0].start_col,
+        end_row: candidates[0].end_row,
+        end_col: candidates[0].end_col,
+        path: candidates[0].path.clone(),
+        line_number: candidates[0].line_number,
+    }];
+    assert!(grid.set_active_link_hints(targets));
+
+    let (chunks, _, _, _) = grid
+        .render(0, 0, &Style::default())
+        .expect("render ok")
+        .expect("some chunks");
+    let row0 = chunks.iter().find(|c| c.y == 0).expect("row 0 chunk");
+    // Badge characters 'a' and 's' at start_col
+    assert_eq!(
+        row0.terminal_characters[candidates[0].start_col].character,
+        'a'
+    );
+    assert_eq!(
+        row0.terminal_characters[candidates[0].start_col + 1].character,
+        's'
+    );
+    // Trailing character after the link span must have explicit Reset background/bold/underline
+    let after_span = &row0.terminal_characters[candidates[0].end_col + 2];
+    assert_eq!(after_span.styles.background, Some(AnsiCode::Reset));
+    assert_eq!(after_span.styles.bold, Some(AnsiCode::Reset));
+    assert_eq!(after_span.styles.underline, Some(AnsiCode::Reset));
+
+    // Type 'a' -> Continue, Backspace -> Continue, 'a' then 's' -> Triggered
+    assert_eq!(
+        grid.handle_link_hint_key(&KeyWithModifier::new(BareKey::Char('a'))),
+        LinkHintAction::Continue
+    );
+    assert_eq!(
+        grid.handle_link_hint_key(&KeyWithModifier::new(BareKey::Backspace)),
+        LinkHintAction::Continue
+    );
+    assert_eq!(
+        grid.handle_link_hint_key(&KeyWithModifier::new(BareKey::Char('a'))),
+        LinkHintAction::Continue
+    );
+    match grid.handle_link_hint_key(&KeyWithModifier::new(BareKey::Char('s'))) {
+        LinkHintAction::Triggered(t) => {
+            assert_eq!(t.path, cargo_toml);
+            assert_eq!(t.line_number, Some(12));
+        },
+        other => panic!("expected Triggered, got {other:?}"),
+    }
+    assert!(!grid.has_active_link_hints());
+}

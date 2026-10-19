@@ -1059,6 +1059,12 @@ fn test_client_messages() {
         is_cli_client: true,
     });
     test_client_roundtrip!(ClientToServerMsg::Action {
+        action: Action::LinkHints,
+        terminal_id: Some(1),
+        client_id: Some(100),
+        is_cli_client: true,
+    });
+    test_client_roundtrip!(ClientToServerMsg::Action {
         action: Action::ScrollUpAt {
             position: Position::new(0, 0),
         },

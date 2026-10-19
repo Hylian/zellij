@@ -250,6 +250,7 @@ pub enum Action {
     ScrollToNextPrompt,
     SelectCommandAtScrollPosition,
     CopyLastCommandOutput,
+    LinkHints,
     /// Scroll down to bottom in focus pane.
     ScrollToBottom,
     /// Scroll up to top in focus pane.
@@ -1068,6 +1069,7 @@ impl Action {
                 Ok(vec![Action::SelectCommandAtScrollPosition])
             },
             CliAction::CopyLastCommandOutput => Ok(vec![Action::CopyLastCommandOutput]),
+            CliAction::LinkHints => Ok(vec![Action::LinkHints]),
             CliAction::ToggleFullscreen { pane_id } => match pane_id {
                 Some(pane_id_str) => {
                     let pane_id = PaneId::from_str(&pane_id_str)

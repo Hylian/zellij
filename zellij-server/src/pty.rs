@@ -2057,6 +2057,9 @@ impl Pty {
     fn capture_initial_cwd(&mut self, terminal_id: u32, child_pid: u32) {
         if let Some(os_input) = self.bus.os_input.as_ref() {
             if let Some(cwd) = os_input.get_cwd(child_pid) {
+                let _ = self.bus.senders.send_to_screen(
+                    ScreenInstruction::UpdatePaneCwd(PaneId::Terminal(terminal_id), cwd.clone()),
+                );
                 self.initial_terminal_cwds.insert(terminal_id, cwd);
             }
         }
@@ -2115,6 +2118,10 @@ impl Pty {
                             None,
                             Event::CwdChanged(pane_id.into(), cwd.clone(), focused_client_ids),
                         )]));
+                    let _ = self
+                        .bus
+                        .senders
+                        .send_to_screen(ScreenInstruction::UpdatePaneCwd(pane_id, cwd.clone()));
                 }
                 self.terminal_cwds.insert(*terminal_id, cwd.clone());
             }

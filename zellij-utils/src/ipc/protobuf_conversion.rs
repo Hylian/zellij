@@ -1185,6 +1185,7 @@ impl From<crate::input::actions::Action>
             ConfirmAction,
             CopyAction,
             CopyLastCommandOutputAction,
+            LinkHintsAction,
             CurrentTabInfoAction,
             DenyAction,
             DetachAction,
@@ -1466,6 +1467,9 @@ impl From<crate::input::actions::Action>
             },
             crate::input::actions::Action::CopyLastCommandOutput => {
                 ActionType::CopyLastCommandOutput(CopyLastCommandOutputAction {})
+            },
+            crate::input::actions::Action::LinkHints => {
+                ActionType::LinkHints(LinkHintsAction {})
             },
             crate::input::actions::Action::PageScrollUp => {
                 ActionType::PageScrollUp(PageScrollUpAction {})
@@ -2364,6 +2368,9 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             },
             ActionType::CopyLastCommandOutput(_) => {
                 Ok(crate::input::actions::Action::CopyLastCommandOutput)
+            },
+            ActionType::LinkHints(_) => {
+                Ok(crate::input::actions::Action::LinkHints)
             },
             ActionType::ScrollUpAt(scroll_action) => {
                 Ok(crate::input::actions::Action::ScrollUpAt {

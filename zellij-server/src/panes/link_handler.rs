@@ -88,6 +88,13 @@ impl LinkHandler {
         })
     }
 
+    pub fn get_uri(&self, link_anchor: Option<LinkAnchor>) -> Option<String> {
+        match link_anchor {
+            Some(LinkAnchor::Start(index)) => self.links.get(&index).map(|link| link.uri.clone()),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub fn links(&self) -> HashMap<u16, Link> {
         self.links.clone()

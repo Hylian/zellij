@@ -264,11 +264,11 @@ use crate::panes::link_handler::LinkHandler;
 use crate::panes::search::SearchResult;
 use crate::panes::terminal_character::{
     AnsiCode, CharsetIndex, Cursor, CursorShape, RcCharacterStyles, StandardCharset,
-    TerminalCharacter, EMPTY_TERMINAL_CHARACTER,
+    TerminalCharacter, EMPTY_TERMINAL_CHARACTER, RESET_STYLES,
 };
 use crate::panes::Selection;
 use crate::ui::components::UiComponentParser;
-use zellij_utils::data::PaneContents;
+use zellij_utils::data::{BareKey, KeyWithModifier, PaneContents};
 
 fn get_top_non_canonical_rows(rows: &mut VecDeque<Row>) -> Vec<Row> {
     let mut index_of_last_non_canonical_row = None;
@@ -889,6 +889,8 @@ pub struct Grid {
     osc133_command_selection: bool,
     command_output_flash: Option<Selection>,
     word_separators: String,
+    pub active_link_hints: Option<ActiveLinkHints>,
+    pub current_cwd: Option<std::path::PathBuf>,
 }
 
 impl Grid {
@@ -960,6 +962,397 @@ fn encode_hex_ascii(value: &str) -> String {
         .bytes()
         .map(|byte| format!("{:02X}", byte))
         .collect::<String>()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkHintCandidate {
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
+    pub path: std::path::PathBuf,
+    pub line_number: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkHintTarget {
+    pub label: String,
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
+    pub path: std::path::PathBuf,
+    pub line_number: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkHintAction {
+    Continue,
+    Cancelled,
+    Triggered(LinkHintTarget),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ActiveLinkHints {
+    pub targets: Vec<LinkHintTarget>,
+    pub input_buffer: String,
+}
+
+const LINK_HINT_ALPHABET: &[u8] = b"asdfghjklqwertyuiopzxcvbnm";
+
+/// Generate `count` prefix-free hint labels using home-row keys first.
+pub fn generate_hint_labels(count: usize) -> Vec<String> {
+    if count == 0 {
+        return vec![];
+    }
+    let base = LINK_HINT_ALPHABET.len();
+    if count <= base {
+        return LINK_HINT_ALPHABET[..count]
+            .iter()
+            .map(|&b| (b as char).to_string())
+            .collect();
+    }
+    let extra = count - base;
+    let prefixes_needed = ((extra + base - 2) / (base - 1)).min(base);
+    let single_count = base - prefixes_needed;
+    let mut labels = Vec::with_capacity(count);
+    for &b in &LINK_HINT_ALPHABET[..single_count] {
+        labels.push((b as char).to_string());
+    }
+    for &p in &LINK_HINT_ALPHABET[single_count..] {
+        for &s in LINK_HINT_ALPHABET {
+            if labels.len() >= count {
+                break;
+            }
+            let mut label = String::with_capacity(2);
+            label.push(p as char);
+            label.push(s as char);
+            labels.push(label);
+        }
+        if labels.len() >= count {
+            break;
+        }
+    }
+    labels
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+fn expand_tilde(path_str: &str) -> std::path::PathBuf {
+    if path_str == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home);
+        }
+    } else if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path_str)
+}
+
+fn split_path_and_line_suffix(raw: &str) -> (&str, Option<usize>) {
+    if let Some((before_hash, after_hash)) = raw.rsplit_once("#L") {
+        let digits: String = after_hash
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(line) = digits.parse::<usize>() {
+            if !before_hash.is_empty() {
+                return (before_hash, Some(line));
+            }
+        }
+    }
+    let parts: Vec<&str> = raw.split(':').collect();
+    if parts.len() >= 3 {
+        if let (Ok(line), Ok(_col)) = (
+            parts[parts.len() - 2].parse::<usize>(),
+            parts[parts.len() - 1].parse::<usize>(),
+        ) {
+            let prefix_len =
+                raw.len() - parts[parts.len() - 2].len() - parts[parts.len() - 1].len() - 2;
+            if prefix_len > 0 {
+                return (&raw[..prefix_len], Some(line));
+            }
+        }
+    }
+    if parts.len() >= 2 {
+        if let Ok(line) = parts[parts.len() - 1].parse::<usize>() {
+            let prefix_len = raw.len() - parts[parts.len() - 1].len() - 1;
+            if prefix_len > 0 {
+                return (&raw[..prefix_len], Some(line));
+            }
+        }
+    }
+    (raw, None)
+}
+
+fn parse_file_uri(uri: &str) -> Option<(String, Option<usize>)> {
+    let rest = uri.strip_prefix("file://")?;
+    let slash_idx = rest.find('/')?;
+    let raw_path = &rest[slash_idx..];
+    let (path_part, fragment_line) = if let Some((p, frag)) = raw_path.split_once('#') {
+        let line = frag
+            .strip_prefix('L')
+            .or_else(|| frag.strip_prefix('l'))
+            .unwrap_or(frag)
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|d| d.parse::<usize>().ok());
+        (p, line)
+    } else {
+        (raw_path, None)
+    };
+    let decoded = percent_decode(path_part);
+    let (clean_path, colon_line) = split_path_and_line_suffix(&decoded);
+    Some((clean_path.to_string(), fragment_line.or(colon_line)))
+}
+
+fn resolve_existing_file(
+    raw_path: &str,
+    cwd: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    if raw_path.is_empty()
+        || raw_path == "."
+        || raw_path == ".."
+        || raw_path == "/"
+        || raw_path == "~"
+    {
+        return None;
+    }
+    let decoded = percent_decode(raw_path);
+    let expanded = expand_tilde(&decoded);
+    let is_valid_file =
+        |p: &std::path::Path| -> bool { std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) };
+
+    if expanded.is_absolute() {
+        if is_valid_file(&expanded) {
+            return Some(expanded);
+        }
+        return None;
+    }
+
+    let stripped_git_prefix = decoded
+        .strip_prefix("a/")
+        .or_else(|| decoded.strip_prefix("b/"));
+
+    if let Some(base) = cwd {
+        let candidate = base.join(&expanded);
+        if is_valid_file(&candidate) {
+            return Some(candidate);
+        }
+        if let Some(stripped) = stripped_git_prefix {
+            let git_candidate = base.join(stripped);
+            if is_valid_file(&git_candidate) {
+                return Some(git_candidate);
+            }
+        }
+        for ancestor in base.ancestors().skip(1).take(6) {
+            let ancestor_candidate = ancestor.join(&expanded);
+            if is_valid_file(&ancestor_candidate) {
+                return Some(ancestor_candidate);
+            }
+            if let Some(stripped) = stripped_git_prefix {
+                let git_ancestor = ancestor.join(stripped);
+                if is_valid_file(&git_ancestor) {
+                    return Some(git_ancestor);
+                }
+            }
+        }
+    } else if is_valid_file(&expanded) {
+        return Some(expanded);
+    }
+
+    None
+}
+
+fn is_path_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '_' | '.' | '/' | '-' | '+' | '@' | '%' | '#' | '=' | '~' | ':' | '$'
+        )
+}
+
+fn trim_path_punctuation(mut slice: &str, mut byte_start: usize) -> (&str, usize) {
+    let leading_trim = |c: char| matches!(c, ':' | '#' | '=' | '+' | '@');
+    while let Some(first) = slice.chars().next() {
+        if leading_trim(first) {
+            let len = first.len_utf8();
+            slice = &slice[len..];
+            byte_start += len;
+        } else {
+            break;
+        }
+    }
+    // Truncate `rg -n` style `path:line(:col)?:trailing_content` before trailing content
+    let mut colon_scan = 0;
+    let bytes = slice.as_bytes();
+    while colon_scan < bytes.len() {
+        if bytes[colon_scan] == b':' && colon_scan > 0 {
+            let rest = &slice[colon_scan + 1..];
+            let digits_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+            if digits_len == 0 {
+                // Non-numeric after `:` (unless `://`)
+                if !rest.starts_with("//") {
+                    slice = &slice[..colon_scan];
+                    break;
+                }
+            } else if digits_len < rest.len() {
+                let after_line = &rest[digits_len..];
+                if let Some(after_col_colon) = after_line.strip_prefix(':') {
+                    let col_digits_len = after_col_colon
+                        .bytes()
+                        .take_while(|b| b.is_ascii_digit())
+                        .count();
+                    let keep_len = if col_digits_len > 0 {
+                        colon_scan + 1 + digits_len + 1 + col_digits_len
+                    } else {
+                        colon_scan + 1 + digits_len
+                    };
+                    slice = &slice[..keep_len];
+                    break;
+                }
+            }
+        }
+        colon_scan += 1;
+    }
+
+    let trailing_trim = |c: char| matches!(c, '.' | ':' | '#' | '=' | '+' | '@');
+    while let Some(last) = slice.chars().next_back() {
+        if trailing_trim(last) {
+            slice = &slice[..slice.len() - last.len_utf8()];
+        } else {
+            break;
+        }
+    }
+    (slice, byte_start)
+}
+
+fn osc8_file_spans_in_group(
+    viewport: &VecDeque<Row>,
+    group_start: usize,
+    group_len: usize,
+    link_handler: &LinkHandler,
+    cwd: Option<&std::path::Path>,
+) -> Vec<LinkHintCandidate> {
+    let mut candidates = Vec::new();
+    let mut active: Option<(u16, usize, usize, std::path::PathBuf, Option<usize>)> = None;
+    let mut prev_pos: Option<(usize, usize)> = None;
+
+    for offset in 0..group_len {
+        let ridx = group_start + offset;
+        let Some(row) = viewport.get(ridx) else {
+            break;
+        };
+        let mut display_col = 0usize;
+        for ch in &row.columns {
+            let w = ch.width();
+            match ch.styles.link_anchor {
+                Some(super::LinkAnchor::Start(id)) => {
+                    let same_link = active
+                        .as_ref()
+                        .map(|(active_id, _, _, _, _)| *active_id == id)
+                        .unwrap_or(false);
+                    if !same_link {
+                        if let Some((_, sr, sc, path, line)) = active.take() {
+                            if let Some((er, ec)) = prev_pos {
+                                candidates.push(LinkHintCandidate {
+                                    start_row: sr,
+                                    start_col: sc,
+                                    end_row: er,
+                                    end_col: ec,
+                                    path,
+                                    line_number: line,
+                                });
+                            }
+                        }
+                        if let Some(uri) = link_handler.get_uri(ch.styles.link_anchor) {
+                            if let Some((path_str, uri_line)) = parse_file_uri(&uri) {
+                                let resolved = resolve_existing_file(&path_str, cwd)
+                                    .unwrap_or_else(|| std::path::PathBuf::from(&path_str));
+                                active = Some((id, ridx, display_col, resolved, uri_line));
+                            }
+                        }
+                    }
+                },
+                Some(super::LinkAnchor::End) | None => {
+                    if let Some((_, sr, sc, path, line)) = active.take() {
+                        let (er, ec) = prev_pos.unwrap_or((sr, sc));
+                        candidates.push(LinkHintCandidate {
+                            start_row: sr,
+                            start_col: sc,
+                            end_row: er,
+                            end_col: ec,
+                            path,
+                            line_number: line,
+                        });
+                    }
+                },
+            }
+            if active.is_some() {
+                prev_pos = Some((ridx, display_col + w.saturating_sub(1)));
+            }
+            display_col += w;
+        }
+    }
+    if let Some((_, sr, sc, path, line)) = active.take() {
+        let (er, ec) = prev_pos.unwrap_or((sr, sc));
+        candidates.push(LinkHintCandidate {
+            start_row: sr,
+            start_col: sc,
+            end_row: er,
+            end_col: ec,
+            path,
+            line_number: line,
+        });
+    }
+    candidates
+}
+
+fn spans_overlap(a: &LinkHintCandidate, b: &LinkHintCandidate) -> bool {
+    let a_start = (a.start_row, a.start_col);
+    let a_end = (a.end_row, a.end_col);
+    let b_start = (b.start_row, b.start_col);
+    let b_end = (b.end_row, b.end_col);
+    a_start <= b_end && b_start <= a_end
+}
+
+fn byte_span_to_viewport_coords(
+    byte_start: usize,
+    byte_end: usize,
+    logical_text: &str,
+    boundaries: &[(usize, usize)],
+    viewport: &VecDeque<Row>,
+) -> Option<(usize, usize, usize, usize)> {
+    if byte_end <= byte_start {
+        return None;
+    }
+    let slice = logical_text.get(byte_start..byte_end)?;
+    let (last_rel_offset, last_ch) = slice.char_indices().next_back()?;
+    let (start_row, start_col) = byte_offset_to_display_col(byte_start, boundaries, viewport)?;
+    let (end_row, last_char_col) =
+        byte_offset_to_display_col(byte_start + last_rel_offset, boundaries, viewport)?;
+    let end_col = last_char_col + last_ch.width().unwrap_or(1).saturating_sub(1);
+    Some((start_row, start_col, end_row, end_col))
 }
 
 /// A compiled highlight entry for one plugin/pattern combination.
@@ -1262,7 +1655,12 @@ impl Grid {
             osc133_command_selection: true,
             command_output_flash: None,
             word_separators: DEFAULT_WORD_SEPARATORS.to_owned(),
+            active_link_hints: None,
+            current_cwd: std::env::current_dir().ok(),
         }
+    }
+    pub fn set_current_cwd(&mut self, cwd: std::path::PathBuf) {
+        self.current_cwd = Some(cwd);
     }
     pub fn set_selection_options(&mut self, osc133_command_selection: bool, word_separators: &str) {
         self.osc133_command_selection = osc133_command_selection;
@@ -1644,6 +2042,9 @@ impl Grid {
         // Do nothing if this pane hasn't been given a proper size yet
         if new_columns == 0 || new_rows == 0 {
             return;
+        }
+        if self.active_link_hints.take().is_some() {
+            self.output_buffer.update_all_lines();
         }
         if self.alternate_screen_state.is_some() {
             // in alternate screen we do nothing but log the new size, the program in the terminal
@@ -2101,6 +2502,120 @@ impl Grid {
                     character_chunk.add_selection_and_colors(*hs, content_x, content_y);
                 }
             }
+            if let Some(active_hints) = &self.active_link_hints {
+                let row_in_viewport = character_chunk.y.saturating_sub(content_y);
+                let chunk_x_start = character_chunk.x.saturating_sub(content_x);
+                let badge_bg = match style.colors.text_unselected.emphasis_0 {
+                    PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
+                    PaletteColor::EightBit(col) => AnsiCode::ColorIndex(col),
+                };
+                let matched_prefix_bg = match style.colors.text_unselected.emphasis_2 {
+                    PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
+                    PaletteColor::EightBit(col) => AnsiCode::ColorIndex(col),
+                };
+                let badge_fg = match style.colors.text_unselected.background {
+                    PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
+                    PaletteColor::EightBit(col) => AnsiCode::ColorIndex(col),
+                };
+                let link_fg = match style.colors.text_unselected.emphasis_1 {
+                    PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
+                    PaletteColor::EightBit(col) => AnsiCode::ColorIndex(col),
+                };
+                let mut row_modified_by_hints = false;
+                for target in &active_hints.targets {
+                    if !target.label.starts_with(&active_hints.input_buffer) {
+                        continue;
+                    }
+                    // Underline + color the matched link span so the user sees the full target
+                    if row_in_viewport >= target.start_row && row_in_viewport <= target.end_row {
+                        row_modified_by_hints = true;
+                        let span_start = if row_in_viewport == target.start_row {
+                            target.start_col
+                        } else {
+                            0
+                        };
+                        let span_end = if row_in_viewport == target.end_row {
+                            target.end_col
+                        } else {
+                            self.width.saturating_sub(1)
+                        };
+                        let mut display_col = chunk_x_start;
+                        for tc in character_chunk.terminal_characters.iter_mut() {
+                            let w = tc.width();
+                            if display_col >= span_start && display_col <= span_end {
+                                tc.styles = RESET_STYLES
+                                    .foreground(Some(link_fg))
+                                    .underline(Some(AnsiCode::Underline(None)))
+                                    .into();
+                            }
+                            display_col += w;
+                        }
+                    }
+                    // Overlay the 1-2 character hint badge at the start of the link
+                    if target.start_row == row_in_viewport {
+                        row_modified_by_hints = true;
+                        let mut display_col = chunk_x_start;
+                        let label_chars: Vec<char> = target.label.chars().collect();
+                        let prefix_len = active_hints.input_buffer.chars().count();
+                        for tc in character_chunk.terminal_characters.iter_mut() {
+                            let w = tc.width();
+                            if display_col >= target.start_col {
+                                let offset = display_col - target.start_col;
+                                if let Some(&ch) = label_chars.get(offset) {
+                                    if w == 1 {
+                                        let bg = if offset < prefix_len {
+                                            matched_prefix_bg
+                                        } else {
+                                            badge_bg
+                                        };
+                                        tc.character = ch;
+                                        tc.styles = RESET_STYLES
+                                            .foreground(Some(badge_fg))
+                                            .background(Some(bg))
+                                            .bold(Some(AnsiCode::On))
+                                            .into();
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            display_col += w;
+                        }
+                    }
+                }
+                if row_modified_by_hints {
+                    // `CharacterStyles::update_and_return_diff` treats `None` as "no change from
+                    // previous character", which would let badge background/bold/underline bleed
+                    // into trailing unstyled cells on the same row. Normalize `None` fields on the
+                    // row to `Some(AnsiCode::Reset)` so the VTE serializer emits explicit resets.
+                    for tc in character_chunk.terminal_characters.iter_mut() {
+                        if tc.styles.foreground.is_none()
+                            || tc.styles.background.is_none()
+                            || tc.styles.bold.is_none()
+                            || tc.styles.italic.is_none()
+                            || tc.styles.underline.is_none()
+                        {
+                            let mut s = *tc.styles;
+                            if s.foreground.is_none() {
+                                s.foreground = Some(AnsiCode::Reset);
+                            }
+                            if s.background.is_none() {
+                                s.background = Some(AnsiCode::Reset);
+                            }
+                            if s.bold.is_none() {
+                                s.bold = Some(AnsiCode::Reset);
+                            }
+                            if s.italic.is_none() {
+                                s.italic = Some(AnsiCode::Reset);
+                            }
+                            if s.underline.is_none() {
+                                s.underline = Some(AnsiCode::Reset);
+                            }
+                            tc.styles = s.into();
+                        }
+                    }
+                }
+            }
         }
         return Ok(Some((
             character_chunks,
@@ -2125,6 +2640,9 @@ impl Grid {
     }
     /// Clears all buffers with text for a current screen
     pub fn clear_screen(&mut self) {
+        if self.active_link_hints.take().is_some() {
+            self.output_buffer.update_all_lines();
+        }
         if self.alternate_screen_state.is_some() {
             log::warn!("Tried to clear pane with alternate_screen_state");
             return;
@@ -2216,6 +2734,9 @@ impl Grid {
         self.output_buffer.update_all_lines(); // TODO: only update scroll region lines
     }
     pub fn fill_viewport(&mut self, character: TerminalCharacter) {
+        if self.active_link_hints.take().is_some() {
+            self.output_buffer.update_all_lines();
+        }
         if self.alternate_screen_state.is_some() {
             self.viewport.clear();
         } else {
@@ -2973,6 +3494,250 @@ impl Grid {
         self.hover_position = new_pos;
         self.recompute_hover_tooltip();
         true
+    }
+
+    /// Scan the current viewport for valid file paths (including `path:line(:col)` and
+    /// `path#Lline` suffixes, `~/` paths, relative paths against the pane's CWD or git root,
+    /// and OSC 8 `file://` hyperlinks) and return deduplicated candidates in reading order.
+    pub fn collect_link_hint_candidates(&self) -> Vec<LinkHintCandidate> {
+        let mut candidates: Vec<LinkHintCandidate> = Vec::new();
+        let viewport_len = self.viewport.len();
+        let cwd = self.current_cwd.as_deref();
+        let link_handler = self.link_handler.borrow();
+
+        let mut ridx = 0;
+        while ridx < viewport_len {
+            let (_canonical, group_len, logical_text, boundaries) =
+                match collect_and_build_logical_line(&self.viewport, ridx) {
+                    Some(v) => v,
+                    None => break,
+                };
+
+            // 1. Collect OSC 8 `file://` hyperlinks in this logical line group
+            for osc8_cand in osc8_file_spans_in_group(
+                &self.viewport,
+                ridx,
+                group_len,
+                &link_handler,
+                cwd,
+            ) {
+                if !candidates.iter().any(|existing| spans_overlap(existing, &osc8_cand)) {
+                    candidates.push(osc8_cand);
+                }
+            }
+
+            // 2. Scan plain-text tokens in `logical_text` for existing file paths
+            let mut token_start: Option<usize> = None;
+            for (byte_idx, ch) in logical_text.char_indices() {
+                if is_path_token_char(ch) {
+                    if token_start.is_none() {
+                        token_start = Some(byte_idx);
+                    }
+                } else if let Some(start) = token_start.take() {
+                    self.try_push_text_path_candidate(
+                        &logical_text,
+                        start,
+                        byte_idx,
+                        &boundaries,
+                        cwd,
+                        &mut candidates,
+                    );
+                }
+            }
+            if let Some(start) = token_start.take() {
+                self.try_push_text_path_candidate(
+                    &logical_text,
+                    start,
+                    logical_text.len(),
+                    &boundaries,
+                    cwd,
+                    &mut candidates,
+                );
+            }
+
+            ridx += group_len;
+        }
+
+        candidates.sort_by_key(|c| (c.start_row, c.start_col));
+        candidates
+    }
+
+    fn try_push_text_path_candidate(
+        &self,
+        logical_text: &str,
+        raw_start: usize,
+        raw_end: usize,
+        boundaries: &[(usize, usize)],
+        cwd: Option<&std::path::Path>,
+        candidates: &mut Vec<LinkHintCandidate>,
+    ) {
+        let raw_slice = &logical_text[raw_start..raw_end];
+        let (trimmed, trimmed_start) = trim_path_punctuation(raw_slice, raw_start);
+        if trimmed.len() < 2 {
+            return;
+        }
+        let trimmed_end = trimmed_start + trimmed.len();
+
+        // Skip web/mail/ssh schemes that aren't local files
+        if trimmed.starts_with("http://")
+            || trimmed.starts_with("https://")
+            || trimmed.starts_with("mailto:")
+            || trimmed.starts_with("ftp://")
+            || trimmed.starts_with("ssh://")
+            || trimmed.starts_with("git://")
+        {
+            return;
+        }
+
+        let (resolved_path, line_number) = if trimmed.starts_with("file://") {
+            let Some((path_str, line)) = parse_file_uri(trimmed) else {
+                return;
+            };
+            let Some(resolved) = resolve_existing_file(&path_str, cwd) else {
+                return;
+            };
+            (resolved, line)
+        } else {
+            let (path_str, line) = split_path_and_line_suffix(trimmed);
+            // Require either a path separator `/`, a leading `~`, a file extension `.`,
+            // or an explicit `:line` suffix so ordinary words don't stat-match accidentally.
+            let looks_like_path = path_str.contains('/')
+                || path_str.starts_with('~')
+                || line.is_some()
+                || path_str
+                    .rsplit_once('.')
+                    .map(|(stem, ext)| {
+                        !stem.is_empty()
+                            && !ext.is_empty()
+                            && ext.len() <= 12
+                            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                    })
+                    .unwrap_or(false);
+            if !looks_like_path {
+                return;
+            }
+            let Some(resolved) = resolve_existing_file(path_str, cwd) else {
+                return;
+            };
+            (resolved, line)
+        };
+
+        let Some((start_row, start_col, end_row, end_col)) = byte_span_to_viewport_coords(
+            trimmed_start,
+            trimmed_end,
+            logical_text,
+            boundaries,
+            &self.viewport,
+        ) else {
+            return;
+        };
+
+        let cand = LinkHintCandidate {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            path: resolved_path,
+            line_number,
+        };
+        if !candidates.iter().any(|existing| spans_overlap(existing, &cand)) {
+            candidates.push(cand);
+        }
+    }
+
+    pub fn set_active_link_hints(&mut self, targets: Vec<LinkHintTarget>) -> bool {
+        if targets.is_empty() {
+            let had_hints = self.active_link_hints.take().is_some();
+            if had_hints {
+                self.output_buffer.update_all_lines();
+            }
+            return false;
+        }
+        self.active_link_hints = Some(ActiveLinkHints {
+            targets,
+            input_buffer: String::new(),
+        });
+        self.output_buffer.update_all_lines();
+        true
+    }
+
+    pub fn has_active_link_hints(&self) -> bool {
+        self.active_link_hints.is_some()
+    }
+
+    pub fn link_hint_input_buffer(&self) -> Option<&str> {
+        self.active_link_hints
+            .as_ref()
+            .map(|h| h.input_buffer.as_str())
+    }
+
+    pub fn clear_link_hints(&mut self) -> bool {
+        if self.active_link_hints.take().is_some() {
+            self.output_buffer.update_all_lines();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn handle_link_hint_key(&mut self, key: &KeyWithModifier) -> LinkHintAction {
+        let Some(mut active_hints) = self.active_link_hints.take() else {
+            return LinkHintAction::Cancelled;
+        };
+
+        if key.is_key_without_modifier(BareKey::Esc)
+            || key.is_key_without_modifier(BareKey::Enter)
+            || key.is_key_with_ctrl_modifier(BareKey::Char('c'))
+            || key.is_key_with_ctrl_modifier(BareKey::Char('g'))
+        {
+            self.output_buffer.update_all_lines();
+            return LinkHintAction::Cancelled;
+        }
+
+        if key.is_key_without_modifier(BareKey::Backspace) {
+            if active_hints.input_buffer.pop().is_some() {
+                self.active_link_hints = Some(active_hints);
+                self.output_buffer.update_all_lines();
+                return LinkHintAction::Continue;
+            } else {
+                self.output_buffer.update_all_lines();
+                return LinkHintAction::Cancelled;
+            }
+        }
+
+        let ch = match (&key.bare_key, key.key_modifiers.is_empty()) {
+            (BareKey::Char(c), true) if c.is_ascii_alphabetic() => c.to_ascii_lowercase(),
+            _ => {
+                self.output_buffer.update_all_lines();
+                return LinkHintAction::Cancelled;
+            },
+        };
+
+        active_hints.input_buffer.push(ch);
+
+        if let Some(exact) = active_hints
+            .targets
+            .iter()
+            .find(|t| t.label == active_hints.input_buffer)
+            .cloned()
+        {
+            self.output_buffer.update_all_lines();
+            return LinkHintAction::Triggered(exact);
+        }
+
+        let has_prefix_matches = active_hints
+            .targets
+            .iter()
+            .any(|t| t.label.starts_with(&active_hints.input_buffer));
+
+        if has_prefix_matches {
+            self.active_link_hints = Some(active_hints);
+            self.output_buffer.update_all_lines();
+            LinkHintAction::Continue
+        } else {
+            self.output_buffer.update_all_lines();
+            LinkHintAction::Cancelled
+        }
     }
 
     /// Mark all physical rows belonging to the logical line group that contains
@@ -4617,6 +5382,7 @@ impl Perform for Grid {
             b"7" => {
                 if let Some(raw) = params.get(1) {
                     if let Some(path) = parse_osc7_path(raw) {
+                        self.current_cwd = Some(path.clone());
                         self.pending_osc7_cwd = Some(path);
                     }
                 }

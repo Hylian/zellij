@@ -48,7 +48,10 @@ use crate::{
     os_input_output::ServerOsApi,
     output::{CharacterChunk, KittyImageChunk, Output, SixelImageChunk},
     panes::floating_panes::floating_pane_grid::half_size_middle_geom,
-    panes::grid::PendingNotification,
+    panes::grid::{
+        generate_hint_labels, LinkHintAction, LinkHintCandidate, LinkHintTarget,
+        PendingNotification,
+    },
     panes::kitty_graphics::{KittyHostSupport, KittyImageStore},
     panes::nested_session_modal::GuestModalShortcuts,
     panes::sixel::SixelImageStore,
@@ -69,7 +72,7 @@ use std::{
 use zellij_utils::{
     data::{Event, FloatingPaneCoordinates, InputMode, ModeInfo, Palette, PaletteColor, Styling},
     input::{
-        command::TerminalAction,
+        command::{OpenFilePayload, TerminalAction},
         layout::{
             FloatingPaneLayout, Run, RunPluginOrAlias, SplitDirection, SwapFloatingLayout,
             SwapTiledLayout, TiledPaneLayout,
@@ -831,6 +834,25 @@ pub trait Pane {
     }
     fn terminal_emulator_wants_mouse(&self) -> bool {
         false
+    }
+    fn collect_link_hint_candidates(&self) -> Vec<LinkHintCandidate> {
+        vec![]
+    }
+    fn set_active_link_hints(&mut self, _targets: Vec<LinkHintTarget>) -> bool {
+        false
+    }
+    fn has_active_link_hints(&self) -> bool {
+        false
+    }
+    fn clear_link_hints(&mut self) -> bool {
+        false
+    }
+    fn handle_link_hint_key(&mut self, _key: &KeyWithModifier) -> LinkHintAction {
+        LinkHintAction::Cancelled
+    }
+    fn set_current_cwd(&mut self, _cwd: std::path::PathBuf) {}
+    fn current_cwd(&self) -> Option<std::path::PathBuf> {
+        None
     }
 }
 
@@ -6243,6 +6265,197 @@ impl Tab {
         if let Some(pane) = self.get_pane_with_id_mut(pane_id) {
             pane.clear_command_output_flash();
         }
+    }
+
+    pub fn update_pane_cwd(&mut self, pane_id: PaneId, cwd: std::path::PathBuf) {
+        if let Some(pane) = self.get_pane_with_id_mut(pane_id) {
+            pane.set_current_cwd(cwd);
+        }
+    }
+
+    pub fn has_active_link_hints(&self) -> bool {
+        self.tiled_panes
+            .get_panes()
+            .any(|(_, p)| p.has_active_link_hints())
+            || self.floating_panes.has_active_link_hints()
+    }
+
+    pub fn clear_all_link_hints(&mut self) -> bool {
+        let mut cleared = false;
+        let pane_ids: Vec<PaneId> = self.tiled_panes.get_panes().map(|(&pid, _)| pid).collect();
+        for pid in pane_ids {
+            if let Some(pane) = self.tiled_panes.get_pane_mut(pid) {
+                if pane.clear_link_hints() {
+                    cleared = true;
+                }
+            }
+        }
+        if self.floating_panes.clear_all_link_hints() {
+            cleared = true;
+        }
+        cleared
+    }
+
+    /// Toggle keyboard link hints across visible terminal panes in this tab.
+    /// Returns `true` if link hints are now active.
+    pub fn start_link_hints(&mut self, client_id: ClientId) -> bool {
+        if self.has_active_link_hints() {
+            self.clear_all_link_hints();
+            return false;
+        }
+
+        let active_pane_id = self.get_active_pane_id(client_id);
+
+        if self.floating_panes.panes_are_visible() {
+            let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) else {
+                return false;
+            };
+            let mut candidates = active_pane.collect_link_hint_candidates();
+            if candidates.is_empty() {
+                return false;
+            }
+            // Assign shorter/home-row labels to bottom-most (most recent) matches first
+            candidates.reverse();
+            let labels = generate_hint_labels(candidates.len());
+            let mut targets: Vec<LinkHintTarget> = candidates
+                .into_iter()
+                .zip(labels.into_iter())
+                .map(|(c, label)| LinkHintTarget {
+                    label,
+                    start_row: c.start_row,
+                    start_col: c.start_col,
+                    end_row: c.end_row,
+                    end_col: c.end_col,
+                    path: c.path,
+                    line_number: c.line_number,
+                })
+                .collect();
+            targets.reverse();
+            return active_pane.set_active_link_hints(targets);
+        }
+
+        // Collect candidates across all visible tiled panes, prioritizing the active pane first
+        let mut pane_ids: Vec<PaneId> = self
+            .tiled_panes
+            .get_panes()
+            .filter(|(_, p)| p.selectable())
+            .map(|(&pid, _)| pid)
+            .collect();
+        pane_ids.sort_by_key(|&pid| (Some(pid) != active_pane_id, pid));
+
+        let mut all_candidates: Vec<(PaneId, LinkHintCandidate)> = Vec::new();
+        for pid in &pane_ids {
+            if let Some(pane) = self.tiled_panes.get_pane(*pid) {
+                let mut cands = pane.collect_link_hint_candidates();
+                cands.reverse();
+                for c in cands {
+                    all_candidates.push((*pid, c));
+                }
+            }
+        }
+        if all_candidates.is_empty() {
+            return false;
+        }
+        let labels = generate_hint_labels(all_candidates.len());
+        let mut per_pane_targets: HashMap<PaneId, Vec<LinkHintTarget>> = HashMap::new();
+        for ((pid, c), label) in all_candidates.into_iter().zip(labels.into_iter()) {
+            per_pane_targets.entry(pid).or_default().push(LinkHintTarget {
+                label,
+                start_row: c.start_row,
+                start_col: c.start_col,
+                end_row: c.end_row,
+                end_col: c.end_col,
+                path: c.path,
+                line_number: c.line_number,
+            });
+        }
+        let mut any_activated = false;
+        for (pid, mut targets) in per_pane_targets {
+            targets.reverse();
+            if let Some(pane) = self.tiled_panes.get_pane_mut(pid) {
+                if pane.set_active_link_hints(targets) {
+                    any_activated = true;
+                }
+            }
+        }
+        any_activated
+    }
+
+    /// Process a keypress while link hints are active. Returns `Ok(true)` if link hints remain
+    /// active after this key, or `Ok(false)` if they finished/cancelled.
+    pub fn handle_link_hint_key(
+        &mut self,
+        key_with_modifier: &Option<KeyWithModifier>,
+        raw_input_bytes: &[u8],
+        client_id: ClientId,
+    ) -> Result<bool> {
+        let parsed_key = key_with_modifier
+            .clone()
+            .or_else(|| parse_keys(raw_input_bytes).into_iter().next());
+        let Some(key) = parsed_key else {
+            self.clear_all_link_hints();
+            return Ok(false);
+        };
+
+        let mut triggered: Option<(PaneId, LinkHintTarget)> = None;
+        let mut any_continue = false;
+
+        if self.floating_panes.panes_are_visible() {
+            if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
+                let pid = active_pane.pid();
+                match active_pane.handle_link_hint_key(&key) {
+                    LinkHintAction::Triggered(target) => triggered = Some((pid, target)),
+                    LinkHintAction::Continue => any_continue = true,
+                    LinkHintAction::Cancelled => {},
+                }
+            }
+        } else {
+            let pane_ids: Vec<PaneId> = self.tiled_panes.get_panes().map(|(&pid, _)| pid).collect();
+            for pid in pane_ids {
+                if let Some(pane) = self.tiled_panes.get_pane_mut(pid) {
+                    if pane.has_active_link_hints() {
+                        match pane.handle_link_hint_key(&key) {
+                            LinkHintAction::Triggered(target) => {
+                                triggered = Some((pid, target));
+                                break;
+                            },
+                            LinkHintAction::Continue => any_continue = true,
+                            LinkHintAction::Cancelled => {},
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((source_pane_id, target)) = triggered {
+            self.clear_all_link_hints();
+            let parent_cwd = self
+                .get_pane_with_id(source_pane_id)
+                .and_then(|p| p.current_cwd())
+                .or_else(|| target.path.parent().map(|p| p.to_path_buf()));
+            let open_file_payload =
+                OpenFilePayload::new(target.path, target.line_number, parent_cwd);
+            let _ = self.senders.send_to_pty(PtyInstruction::SpawnTerminal(
+                Some(TerminalAction::OpenFile(open_file_payload)),
+                None,
+                NewPanePlacement::Tiled {
+                    direction: None,
+                    borderless: None,
+                },
+                false,
+                ClientTabIndexOrPaneId::ClientId(client_id),
+                None,
+                true,
+            ));
+            return Ok(false);
+        }
+
+        if !any_continue {
+            self.clear_all_link_hints();
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 
     pub fn scroll_terminal_up(&mut self, terminal_pane_id: u32) -> Result<()> {
