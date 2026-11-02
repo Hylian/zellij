@@ -1904,6 +1904,10 @@ impl InputParser {
         self.buf.len()
     }
 
+    pub fn is_pasting(&self) -> bool {
+        matches!(self.state, InputState::Pasting(_))
+    }
+
     pub fn parse_as_vec(&mut self, bytes: &[u8], maybe_more: bool) -> Vec<InputEvent> {
         let mut result = Vec::new();
         self.parse(bytes, |event| result.push(event), maybe_more);

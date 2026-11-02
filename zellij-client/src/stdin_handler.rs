@@ -13,6 +13,7 @@ const LONE_ESC_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 const PARTIAL_REPLY_FLUSH_GUARD: Duration = Duration::from_millis(1000);
 use zellij_utils::{
     channels::SenderWithContext,
+    data::KeyWithModifier,
     vendored::termwiz::input::{InputEvent, InputParser},
 };
 
@@ -80,17 +81,11 @@ pub(crate) fn stdin_loop(
     // the VT reader path and Unix don't produce crossterm resize events.
     drop(resize_sender);
 
-    // Byte reader + termwiz/kitty parser path.
+    // Byte reader + unified streaming Kitty/termwiz key decoder path.
     // Used on Unix always, and on Windows inside terminal emulators (Alacritty,
     // etc.) with ENABLE_VIRTUAL_TERMINAL_INPUT enabled so stdin delivers raw VT
     // byte sequences.
-    let mut input_parser = InputParser::new();
-    // Kitty keyboard parser is long-lived so a Kitty CSI sequence split
-    // across stdin reads still resolves on a follow-up chunk instead of
-    // silently degrading to a legacy CSI form (and losing modifier
-    // metadata).
-    let mut kitty_parser = KittyKeyboardParser::new();
-    let mut current_buffer = vec![];
+    let mut key_decoder = StdinKeyDecoder::new(explicitly_disable_kitty_keyboard_protocol);
     let (stdin_tx, stdin_rx) = mpsc::sync_channel(32);
     let _stdin_pump = std::thread::Builder::new()
         .name("stdin_pump".to_string())
@@ -111,6 +106,7 @@ pub(crate) fn stdin_loop(
         });
     let mut needs_finalization = false;
     let mut reply_in_progress_since: Option<Instant> = None;
+    let mut key_in_progress_since: Option<Instant> = None;
     'stdin: loop {
         match if needs_finalization {
             stdin_rx.recv_timeout(LONE_ESC_FLUSH_INTERVAL)
@@ -164,86 +160,23 @@ pub(crate) fn stdin_loop(
                             let _ = send_input_instructions
                                 .send(InputInstruction::HostTerminalFocusChanged(focused));
                         }
-                        if residue.is_empty() {
-                            schedule_finalization(
-                                &stdin_ansi_parser,
-                                false,
-                                &mut needs_finalization,
-                                &mut reply_in_progress_since,
-                            );
-                            continue;
-                        }
-                        current_buffer.append(&mut residue.clone());
-
-                        if !explicitly_disable_kitty_keyboard_protocol {
-                            // first we try to parse with the KittyKeyboardParser
-                            // if we fail, we try to parse normally.
-                            // Incomplete and NoMatch both fall through to the
-                            // termwiz parser below; on Incomplete the Kitty
-                            // parser keeps its state so the next chunk's
-                            // continuation completes the sequence.
-                            match kitty_parser.feed(&residue) {
-                                KittyParseOutcome::Complete(key_with_modifier) => {
-                                    if send_input_instructions
-                                        .send(InputInstruction::KeyWithModifierEvent(
-                                            key_with_modifier,
-                                            current_buffer.drain(..).collect(),
-                                            true,
-                                        ))
-                                        .is_err()
-                                    {
-                                        break 'stdin;
-                                    }
-                                    schedule_finalization(
-                                        &stdin_ansi_parser,
-                                        false,
-                                        &mut needs_finalization,
-                                        &mut reply_in_progress_since,
-                                    );
-                                    continue;
-                                },
-                                KittyParseOutcome::Incomplete | KittyParseOutcome::NoMatch => {},
-                            }
-                        }
-
-                        // Parse with maybe_more = true - complete events sent immediately
-                        //
-                        // Ambiguous events (if any) will be finalized later only if 50ms
-                        // passes with no new input
-                        let maybe_more = true;
-                        let mut events: Vec<(InputEvent, usize)> = vec![];
-                        input_parser.parse_with_consumed(
-                            &residue,
-                            |input_event: InputEvent, consumed: usize| {
-                                events.push((input_event, consumed));
-                            },
-                            maybe_more,
-                        );
-
-                        // Residue contains no OSC or whitelisted CSI
-                        // reports — `StdinAnsiParser::feed` strips both
-                        // before the keyboard parser sees the bytes.
-                        // Every termwiz event is a key/mouse/paste/etc.
-                        // Each event is forwarded with exactly the bytes
-                        // that produced it, never bytes belonging to other
-                        // events decoded from the same read.
-                        for (input_event, consumed) in events.into_iter() {
-                            let take = consumed.min(current_buffer.len());
-                            let raw_bytes: Vec<u8> = current_buffer.drain(..take).collect();
-                            if send_input_instructions
-                                .send(InputInstruction::KeyEvent(input_event, raw_bytes))
-                                .is_err()
-                            {
+                        if !residue.is_empty() {
+                            let events = key_decoder.feed(&residue);
+                            if !dispatch_decoded_events(events, &send_input_instructions) {
                                 break 'stdin;
                             }
+                            if key_decoder.pending_state() == PendingInputState::InFlightSequence {
+                                key_in_progress_since = Some(Instant::now());
+                            } else {
+                                key_in_progress_since = None;
+                            }
                         }
-                        realign_current_buffer(&mut current_buffer, &input_parser);
-
-                        schedule_finalization(
+                        update_finalization_state(
                             &stdin_ansi_parser,
-                            true,
+                            &key_decoder,
                             &mut needs_finalization,
                             &mut reply_in_progress_since,
+                            &mut key_in_progress_since,
                         );
                     },
                     Err(e) => {
@@ -258,35 +191,68 @@ pub(crate) fn stdin_loop(
                 }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let pending = stdin_ansi_parser.lock().unwrap().pending_partial();
-                if pending.uses_reply_flush_guard() {
-                    let elapsed = reply_in_progress_since
-                        .map(|since| since.elapsed())
-                        .unwrap_or_default();
-                    if elapsed >= PARTIAL_REPLY_FLUSH_GUARD {
-                        let drained = stdin_ansi_parser.lock().unwrap().finalize_force();
-                        drain_partial_to_keyboard(
-                            &mut input_parser,
-                            &mut current_buffer,
-                            send_input_instructions.clone(),
-                            drained,
-                        );
-                        needs_finalization = false;
-                        reply_in_progress_since = None;
+                let ansi_pending = stdin_ansi_parser.lock().unwrap().pending_partial();
+                if ansi_pending != PendingPartial::None {
+                    if ansi_pending.uses_reply_flush_guard() {
+                        let elapsed = reply_in_progress_since
+                            .map(|since| since.elapsed())
+                            .unwrap_or_default();
+                        if elapsed >= PARTIAL_REPLY_FLUSH_GUARD {
+                            let drained = stdin_ansi_parser.lock().unwrap().finalize_force();
+                            if !drained.is_empty() {
+                                let mut events = key_decoder.feed(&drained);
+                                events.extend(key_decoder.flush_force());
+                                if !dispatch_decoded_events(events, &send_input_instructions) {
+                                    break 'stdin;
+                                }
+                            }
+                            reply_in_progress_since = None;
+                        }
                     } else {
-                        needs_finalization = true;
+                        let drained = stdin_ansi_parser.lock().unwrap().finalize_fast_partial();
+                        if !drained.is_empty() {
+                            let mut events = key_decoder.feed(&drained);
+                            events.extend(key_decoder.flush_fast_timeout());
+                            if !dispatch_decoded_events(events, &send_input_instructions) {
+                                break 'stdin;
+                            }
+                        }
+                        reply_in_progress_since = None;
                     }
-                } else {
-                    let drained = stdin_ansi_parser.lock().unwrap().finalize_fast_partial();
-                    drain_partial_to_keyboard(
-                        &mut input_parser,
-                        &mut current_buffer,
-                        send_input_instructions.clone(),
-                        drained,
-                    );
-                    needs_finalization = false;
-                    reply_in_progress_since = None;
                 }
+
+                match key_decoder.pending_state() {
+                    PendingInputState::None => {
+                        key_in_progress_since = None;
+                    },
+                    PendingInputState::FastTimeout => {
+                        let events = key_decoder.flush_fast_timeout();
+                        if !dispatch_decoded_events(events, &send_input_instructions) {
+                            break 'stdin;
+                        }
+                        key_in_progress_since = None;
+                    },
+                    PendingInputState::InFlightSequence => {
+                        let elapsed = key_in_progress_since
+                            .map(|since| since.elapsed())
+                            .unwrap_or_default();
+                        if elapsed >= PARTIAL_REPLY_FLUSH_GUARD {
+                            let events = key_decoder.flush_force();
+                            if !dispatch_decoded_events(events, &send_input_instructions) {
+                                break 'stdin;
+                            }
+                            key_in_progress_since = None;
+                        }
+                    },
+                }
+
+                update_finalization_state(
+                    &stdin_ansi_parser,
+                    &key_decoder,
+                    &mut needs_finalization,
+                    &mut reply_in_progress_since,
+                    &mut key_in_progress_since,
+                );
             },
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 log::debug!("STDIN pump disconnected");
@@ -297,51 +263,463 @@ pub(crate) fn stdin_loop(
     }
 }
 
-fn schedule_finalization(
+fn dispatch_decoded_events(
+    events: Vec<DecodedStdinEvent>,
+    send_input_instructions: &SenderWithContext<InputInstruction>,
+) -> bool {
+    for event in events {
+        let instruction = match event {
+            DecodedStdinEvent::KittyKey(key, raw_bytes) => {
+                InputInstruction::KeyWithModifierEvent(key, raw_bytes, true)
+            },
+            DecodedStdinEvent::Termwiz(input_event, raw_bytes) => {
+                InputInstruction::KeyEvent(input_event, raw_bytes)
+            },
+        };
+        if send_input_instructions.send(instruction).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+fn update_finalization_state(
     stdin_ansi_parser: &Arc<Mutex<StdinAnsiParser>>,
-    fed_termwiz: bool,
+    key_decoder: &StdinKeyDecoder,
     needs_finalization: &mut bool,
     reply_in_progress_since: &mut Option<Instant>,
+    key_in_progress_since: &mut Option<Instant>,
 ) {
-    let pending = stdin_ansi_parser.lock().unwrap().pending_partial();
-    if fed_termwiz || pending != PendingPartial::None {
-        *needs_finalization = true;
-    }
-    if pending.uses_reply_flush_guard() {
+    let ansi_pending = stdin_ansi_parser.lock().unwrap().pending_partial();
+    let key_pending = key_decoder.pending_state();
+
+    *needs_finalization =
+        ansi_pending != PendingPartial::None || key_pending != PendingInputState::None;
+
+    if ansi_pending.uses_reply_flush_guard() {
         if reply_in_progress_since.is_none() {
             *reply_in_progress_since = Some(Instant::now());
         }
     } else {
         *reply_in_progress_since = None;
     }
+
+    if key_pending == PendingInputState::InFlightSequence {
+        if key_in_progress_since.is_none() {
+            *key_in_progress_since = Some(Instant::now());
+        }
+    } else {
+        *key_in_progress_since = None;
+    }
 }
 
-fn drain_partial_to_keyboard(
-    input_parser: &mut InputParser,
-    current_buffer: &mut Vec<u8>,
-    send_input_instructions: SenderWithContext<InputInstruction>,
-    drained: Vec<u8>,
-) {
-    if !drained.is_empty() {
-        current_buffer.extend_from_slice(&drained);
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DecodedStdinEvent {
+    KittyKey(KeyWithModifier, Vec<u8>),
+    Termwiz(InputEvent, Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingInputState {
+    None,
+    /// Ambiguous short escape prefix (`\x1b`, `\x1b[`, `\x1bO`, or incomplete UTF-8 char)
+    /// that flushes after `LONE_ESC_FLUSH_INTERVAL` (50ms) when idle.
+    FastTimeout,
+    /// In-flight multi-byte CSI/SS3 sequence (`\x1b[<params>...`, `\x1bO<params>...`)
+    /// split across reads; held up to `PARTIAL_REPLY_FLUSH_GUARD` (1000ms) so SSH jitter
+    /// never splits an escape sequence into spurious Esc + literal tail bytes.
+    InFlightSequence,
+}
+
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+const MAX_INFLIGHT_SEQ_LEN: usize = 64;
+
+/// Unified streaming stdin tokenizer that slices coalesced byte streams into
+/// individual Kitty CSI events and termwiz events while maintaining a single
+/// pending byte buffer across fragmented reads.
+pub(crate) struct StdinKeyDecoder {
+    input_parser: InputParser,
+    pending: Vec<u8>,
+    explicitly_disable_kitty_keyboard_protocol: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeqScan {
+    Complete(usize),
+    Incomplete,
+    Aborted(usize),
+}
+
+fn scan_csi(buf: &[u8]) -> SeqScan {
+    debug_assert!(buf.starts_with(b"\x1b["));
+    if buf.len() == 2 {
+        return SeqScan::Incomplete;
+    }
+    let mut idx = 2;
+    while idx < buf.len() && (0x30..=0x3F).contains(&buf[idx]) {
+        idx += 1;
+    }
+    while idx < buf.len() && (0x20..=0x2F).contains(&buf[idx]) {
+        idx += 1;
+    }
+    if idx == buf.len() {
+        if buf.len() <= MAX_INFLIGHT_SEQ_LEN {
+            SeqScan::Incomplete
+        } else {
+            SeqScan::Aborted(buf.len())
+        }
+    } else if (0x40..=0x7E).contains(&buf[idx]) {
+        SeqScan::Complete(idx + 1)
+    } else {
+        SeqScan::Aborted(idx)
+    }
+}
+
+fn scan_ss3(buf: &[u8]) -> SeqScan {
+    debug_assert!(buf.starts_with(b"\x1bO"));
+    if buf.len() == 2 {
+        return SeqScan::Incomplete;
+    }
+    if (0x40..=0x7E).contains(&buf[2]) {
+        return SeqScan::Complete(3);
+    }
+    if buf[2] != b'1' {
+        return SeqScan::Aborted(2);
+    }
+    let mut idx = 3;
+    while idx < buf.len() && (0x30..=0x3F).contains(&buf[idx]) {
+        idx += 1;
+    }
+    if idx == buf.len() {
+        if buf.len() <= MAX_INFLIGHT_SEQ_LEN {
+            SeqScan::Incomplete
+        } else {
+            SeqScan::Aborted(buf.len())
+        }
+    } else if (0x40..=0x7E).contains(&buf[idx]) {
+        SeqScan::Complete(idx + 1)
+    } else {
+        SeqScan::Aborted(idx)
+    }
+}
+
+fn utf8_expected_len(first_byte: u8) -> usize {
+    match first_byte {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 1,
+    }
+}
+
+fn trailing_incomplete_utf8_len(bytes: &[u8]) -> usize {
+    let max_back = bytes.len().min(3);
+    for back in 1..=max_back {
+        let pos = bytes.len() - back;
+        let b = bytes[pos];
+        if (b & 0xC0) != 0x80 {
+            let expected = utf8_expected_len(b);
+            if expected > back && bytes[pos + 1..].iter().all(|&c| (c & 0xC0) == 0x80) {
+                return back;
+            }
+            return 0;
+        }
+    }
+    0
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn trailing_prefix_len(buf: &[u8], marker: &[u8]) -> usize {
+    let max_k = buf.len().min(marker.len().saturating_sub(1));
+    for k in (1..=max_k).rev() {
+        if &buf[buf.len() - k..] == &marker[..k] {
+            return k;
+        }
+    }
+    0
+}
+
+enum KittyCsiMatch {
+    Key(KeyWithModifier),
+    IgnoredRelease,
+    NoMatch,
+}
+
+fn csi_is_kitty_key_release(csi_seq: &[u8]) -> bool {
+    if csi_seq.len() < 3 || !csi_seq.starts_with(b"\x1b[") {
+        return false;
+    }
+    let body = &csi_seq[2..csi_seq.len() - 1];
+    let Some(mod_param) = body.split(|&b| b == b';').nth(1) else {
+        return false;
+    };
+    mod_param.split(|&b| b == b':').nth(1) == Some(b"3")
+}
+
+impl StdinKeyDecoder {
+    pub(crate) fn new(explicitly_disable_kitty_keyboard_protocol: bool) -> Self {
+        Self {
+            input_parser: InputParser::new(),
+            pending: Vec::new(),
+            explicitly_disable_kitty_keyboard_protocol,
+        }
     }
 
-    let mut events: Vec<(InputEvent, usize)> = vec![];
-    input_parser.parse_with_consumed(
-        &drained,
-        |input_event: InputEvent, consumed: usize| {
-            events.push((input_event, consumed));
-        },
-        false,
-    );
-    for (input_event, consumed) in events {
-        let take = consumed.min(current_buffer.len());
-        let raw_bytes: Vec<u8> = current_buffer.drain(..take).collect();
-        send_input_instructions
-            .send(InputInstruction::KeyEvent(input_event, raw_bytes))
-            .unwrap();
+    pub(crate) fn pending_state(&self) -> PendingInputState {
+        if self.input_parser.is_pasting() {
+            // While inside bracketed paste, wait passively for `\x1b[201~`
+            // without triggering 50ms/1000ms escape flushes.
+            return PendingInputState::None;
+        }
+        if self.pending.is_empty() {
+            return PendingInputState::None;
+        }
+        if (self.pending.starts_with(b"\x1b[") && self.pending.len() >= 3)
+            || self.pending.starts_with(b"\x1bO1")
+            || (self.pending.starts_with(b"\x1b\x1b[") && self.pending.len() >= 4)
+            || self.pending.starts_with(b"\x1b\x1bO1")
+        {
+            PendingInputState::InFlightSequence
+        } else {
+            PendingInputState::FastTimeout
+        }
     }
-    realign_current_buffer(current_buffer, input_parser);
+
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<DecodedStdinEvent> {
+        if !bytes.is_empty() {
+            self.pending.extend_from_slice(bytes);
+        }
+        self.drain_complete()
+    }
+
+    pub(crate) fn flush_fast_timeout(&mut self) -> Vec<DecodedStdinEvent> {
+        if self.pending_state() != PendingInputState::FastTimeout {
+            return Vec::new();
+        }
+        let drained = std::mem::take(&mut self.pending);
+        let mut out = Vec::new();
+        self.feed_termwiz_slice(&drained, false, &mut out);
+        out
+    }
+
+    pub(crate) fn flush_force(&mut self) -> Vec<DecodedStdinEvent> {
+        if self.input_parser.is_pasting() || self.pending.is_empty() {
+            return Vec::new();
+        }
+        let drained = std::mem::take(&mut self.pending);
+        let mut out = Vec::new();
+        self.feed_termwiz_slice(&drained, false, &mut out);
+        out
+    }
+
+    fn feed_termwiz_slice(
+        &mut self,
+        chunk: &[u8],
+        maybe_more: bool,
+        out: &mut Vec<DecodedStdinEvent>,
+    ) {
+        let mut cursor = 0usize;
+        self.input_parser.parse_with_consumed(
+            chunk,
+            |input_event, consumed| {
+                let end = cursor.saturating_add(consumed).min(chunk.len());
+                let raw = chunk[cursor..end].to_vec();
+                cursor = end;
+                out.push(DecodedStdinEvent::Termwiz(input_event, raw));
+            },
+            maybe_more,
+        );
+        if !maybe_more && self.input_parser.buffered_len() > 0 && !self.input_parser.is_pasting() {
+            self.input_parser.parse_with_consumed(
+                &[],
+                |input_event, consumed| {
+                    let end = cursor.saturating_add(consumed).min(chunk.len());
+                    let raw = chunk[cursor..end].to_vec();
+                    cursor = end;
+                    out.push(DecodedStdinEvent::Termwiz(input_event, raw));
+                },
+                false,
+            );
+        }
+        if !self.input_parser.is_pasting() && self.input_parser.buffered_len() > 0 {
+            self.input_parser = InputParser::new();
+        }
+    }
+
+    fn try_parse_kitty(&self, csi_seq: &[u8]) -> KittyCsiMatch {
+        if self.explicitly_disable_kitty_keyboard_protocol {
+            return KittyCsiMatch::NoMatch;
+        }
+        match KittyKeyboardParser::new().feed(csi_seq) {
+            KittyParseOutcome::Complete(key) => {
+                if csi_is_kitty_key_release(csi_seq) {
+                    KittyCsiMatch::IgnoredRelease
+                } else {
+                    KittyCsiMatch::Key(key)
+                }
+            },
+            KittyParseOutcome::Incomplete | KittyParseOutcome::NoMatch => KittyCsiMatch::NoMatch,
+        }
+    }
+
+    fn drain_complete(&mut self) -> Vec<DecodedStdinEvent> {
+        let mut out = Vec::new();
+        while !self.pending.is_empty() {
+            if self.input_parser.is_pasting() {
+                if let Some(pos) = find_subsequence(&self.pending, PASTE_END) {
+                    let chunk: Vec<u8> = self.pending.drain(..pos + PASTE_END.len()).collect();
+                    self.feed_termwiz_slice(&chunk, true, &mut out);
+                    continue;
+                } else {
+                    let keep = trailing_prefix_len(&self.pending, PASTE_END);
+                    let safe_len = self.pending.len() - keep;
+                    if safe_len > 0 {
+                        let chunk: Vec<u8> = self.pending.drain(..safe_len).collect();
+                        self.feed_termwiz_slice(&chunk, true, &mut out);
+                    }
+                    break;
+                }
+            }
+
+            if self.pending[0] != 0x1b {
+                if let Some(next_esc) = self.pending.iter().position(|&b| b == 0x1b) {
+                    let chunk: Vec<u8> = self.pending.drain(..next_esc).collect();
+                    self.feed_termwiz_slice(&chunk, false, &mut out);
+                    continue;
+                } else {
+                    let incomplete_tail = trailing_incomplete_utf8_len(&self.pending);
+                    let complete_len = self.pending.len() - incomplete_tail;
+                    if complete_len > 0 {
+                        let chunk: Vec<u8> = self.pending.drain(..complete_len).collect();
+                        self.feed_termwiz_slice(&chunk, false, &mut out);
+                    }
+                    if incomplete_tail > 0 {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            // Starts with `\x1b`
+            if self.pending.len() == 1 {
+                break;
+            }
+
+            match self.pending[1] {
+                b'[' => match scan_csi(&self.pending) {
+                    SeqScan::Incomplete => break,
+                    SeqScan::Aborted(len) => {
+                        let chunk: Vec<u8> = self.pending.drain(..len).collect();
+                        self.feed_termwiz_slice(&chunk, false, &mut out);
+                    },
+                    SeqScan::Complete(csi_len) => {
+                        if &self.pending[..csi_len] == PASTE_START {
+                            let chunk: Vec<u8> = self.pending.drain(..csi_len).collect();
+                            self.feed_termwiz_slice(&chunk, true, &mut out);
+                        } else {
+                            match self.try_parse_kitty(&self.pending[..csi_len]) {
+                                KittyCsiMatch::Key(key) => {
+                                    let raw: Vec<u8> = self.pending.drain(..csi_len).collect();
+                                    out.push(DecodedStdinEvent::KittyKey(key, raw));
+                                },
+                                KittyCsiMatch::IgnoredRelease => {
+                                    self.pending.drain(..csi_len);
+                                },
+                                KittyCsiMatch::NoMatch => {
+                                    let chunk: Vec<u8> = self.pending.drain(..csi_len).collect();
+                                    self.feed_termwiz_slice(&chunk, true, &mut out);
+                                },
+                            }
+                        }
+                    },
+                },
+                b'O' => match scan_ss3(&self.pending) {
+                    SeqScan::Incomplete => break,
+                    SeqScan::Aborted(len) => {
+                        let chunk: Vec<u8> = self.pending.drain(..len).collect();
+                        self.feed_termwiz_slice(&chunk, false, &mut out);
+                    },
+                    SeqScan::Complete(ss3_len) => {
+                        let chunk: Vec<u8> = self.pending.drain(..ss3_len).collect();
+                        self.feed_termwiz_slice(&chunk, false, &mut out);
+                    },
+                },
+                0x1b => {
+                    if self.pending.len() == 2 {
+                        break;
+                    }
+                    match self.pending[2] {
+                        b'[' => match scan_csi(&self.pending[1..]) {
+                            SeqScan::Incomplete => break,
+                            SeqScan::Aborted(_) => {
+                                let esc: Vec<u8> = self.pending.drain(..1).collect();
+                                self.feed_termwiz_slice(&esc, false, &mut out);
+                            },
+                            SeqScan::Complete(csi_len) => {
+                                let inner = &self.pending[1..1 + csi_len];
+                                let is_kitty_only_csi = (inner.ends_with(b"u")
+                                    || inner.contains(&b':'))
+                                    && !matches!(
+                                        self.try_parse_kitty(inner),
+                                        KittyCsiMatch::NoMatch
+                                    );
+                                if inner == PASTE_START || is_kitty_only_csi {
+                                    // Unambiguous Kitty CSI sequences and bracketed paste never use
+                                    // a leading ESC prefix for Alt — flush the standalone ESC first.
+                                    let esc: Vec<u8> = self.pending.drain(..1).collect();
+                                    self.feed_termwiz_slice(&esc, false, &mut out);
+                                } else {
+                                    // Legacy `\x1b\x1b[A` (Alt+Arrow), `\x1b\x1b[5~` (Alt+PageUp),
+                                    // or `\x1b\x1b[<...M` (Esc + Mouse).
+                                    let chunk: Vec<u8> =
+                                        self.pending.drain(..1 + csi_len).collect();
+                                    self.feed_termwiz_slice(&chunk, true, &mut out);
+                                }
+                            },
+                        },
+                        b'O' => match scan_ss3(&self.pending[1..]) {
+                            SeqScan::Incomplete => break,
+                            SeqScan::Aborted(_) => {
+                                let esc: Vec<u8> = self.pending.drain(..1).collect();
+                                self.feed_termwiz_slice(&esc, false, &mut out);
+                            },
+                            SeqScan::Complete(ss3_len) => {
+                                let chunk: Vec<u8> = self.pending.drain(..1 + ss3_len).collect();
+                                self.feed_termwiz_slice(&chunk, false, &mut out);
+                            },
+                        },
+                        _ => {
+                            let esc: Vec<u8> = self.pending.drain(..1).collect();
+                            self.feed_termwiz_slice(&esc, false, &mut out);
+                        },
+                    }
+                },
+                b1 => {
+                    let expected = utf8_expected_len(b1);
+                    if self.pending.len() < 1 + expected {
+                        if self.pending[2..].iter().all(|&c| (c & 0xC0) == 0x80) {
+                            break;
+                        }
+                        let chunk: Vec<u8> = self.pending.drain(..2).collect();
+                        self.feed_termwiz_slice(&chunk, false, &mut out);
+                    } else {
+                        let take = if std::str::from_utf8(&self.pending[1..1 + expected]).is_ok() {
+                            1 + expected
+                        } else {
+                            2
+                        };
+                        let chunk: Vec<u8> = self.pending.drain(..take).collect();
+                        self.feed_termwiz_slice(&chunk, false, &mut out);
+                    }
+                },
+            }
+        }
+        out
+    }
 }
 
 fn extract_focus_reports(residue: Vec<u8>) -> (Vec<u8>, Vec<bool>) {
@@ -373,6 +751,7 @@ fn extract_focus_reports(residue: Vec<u8>) -> (Vec<u8>, Vec<bool>) {
 /// never drift from the parser's internal state: a trailing incomplete
 /// sequence is held by the parser (and mirrored here) until the next
 /// read completes it, while bytes already decoded into events are dropped.
+#[cfg(test)]
 fn realign_current_buffer(current_buffer: &mut Vec<u8>, input_parser: &InputParser) {
     let buffered = input_parser.buffered_len();
     let excess = current_buffer.len().saturating_sub(buffered);
@@ -505,5 +884,260 @@ mod tests {
         assert!(!query.contains("\u{1b}_G"));
         assert!(query.ends_with("\u{1b}[c"));
         assert!(query.starts_with("\u{1b}[14t\u{1b}[16t"));
+    }
+
+    #[test]
+    fn coalesced_kitty_repeats_in_single_read_emit_every_event_as_kitty() {
+        use super::{DecodedStdinEvent, PendingInputState, StdinKeyDecoder};
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+
+        let mut dec = StdinKeyDecoder::new(false);
+        let events = dec.feed(b"\x1b[107;5u\x1b[107;5u\x1b[107;5u");
+        let expected = DecodedStdinEvent::KittyKey(
+            KeyWithModifier::new(BareKey::Char('k')).with_ctrl_modifier(),
+            b"\x1b[107;5u".to_vec(),
+        );
+        assert_eq!(events, vec![expected.clone(), expected.clone(), expected]);
+        assert_eq!(dec.pending_state(), PendingInputState::None);
+    }
+
+    #[test]
+    fn split_kitty_sequence_over_ssh_jitter_plus_coalesced_repeat_never_leaks_garbage() {
+        use super::{DecodedStdinEvent, PendingInputState, StdinKeyDecoder};
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+
+        let mut dec = StdinKeyDecoder::new(false);
+
+        // First TCP segment ends mid-CSI (`\x1b[1`).
+        assert!(dec.feed(b"\x1b[1").is_empty());
+        assert_eq!(dec.pending_state(), PendingInputState::InFlightSequence);
+
+        // 50ms lone-ESC timer fires during an SSH latency spike — must NOT flush
+        // an in-flight CSI sequence into spurious Alt+[ + '1'.
+        assert!(dec.flush_fast_timeout().is_empty());
+
+        // Second TCP segment brings the remainder `07;5u` coalesced with the next repeat.
+        let events = dec.feed(b"07;5u\x1b[107;5u");
+        let expected = DecodedStdinEvent::KittyKey(
+            KeyWithModifier::new(BareKey::Char('k')).with_ctrl_modifier(),
+            b"\x1b[107;5u".to_vec(),
+        );
+        assert_eq!(events, vec![expected.clone(), expected]);
+        assert_eq!(dec.pending_state(), PendingInputState::None);
+    }
+
+    #[test]
+    fn kitty_subparameters_for_repeat_and_shifted_keys_decode_cleanly() {
+        use super::{DecodedStdinEvent, StdinKeyDecoder};
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+
+        let mut dec = StdinKeyDecoder::new(false);
+        let events = dec.feed(b"\x1b[107;5:2u\x1b[91:123;4u");
+        assert_eq!(
+            events,
+            vec![
+                DecodedStdinEvent::KittyKey(
+                    KeyWithModifier::new(BareKey::Char('k')).with_ctrl_modifier(),
+                    b"\x1b[107;5:2u".to_vec(),
+                ),
+                DecodedStdinEvent::KittyKey(
+                    KeyWithModifier::new(BareKey::Char('['))
+                        .with_alt_modifier()
+                        .with_shift_modifier(),
+                    b"\x1b[91:123;4u".to_vec(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_text_kitty_brackets_and_sgr_mouse_in_one_chunk() {
+        use super::{DecodedStdinEvent, StdinKeyDecoder};
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+        use zellij_utils::vendored::termwiz::input::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let mut dec = StdinKeyDecoder::new(false);
+        let events = dec.feed(b"a\x1b[91;3u\x1b[<35;10;20M\x1b[93;3u");
+        assert_eq!(events.len(), 4);
+        assert_eq!(
+            events[0],
+            DecodedStdinEvent::Termwiz(
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('a'),
+                    modifiers: Modifiers::NONE,
+                }),
+                b"a".to_vec(),
+            )
+        );
+        assert_eq!(
+            events[1],
+            DecodedStdinEvent::KittyKey(
+                KeyWithModifier::new(BareKey::Char('[')).with_alt_modifier(),
+                b"\x1b[91;3u".to_vec(),
+            )
+        );
+        assert!(matches!(
+            events[2],
+            DecodedStdinEvent::Termwiz(InputEvent::Mouse(_), _)
+        ));
+        assert_eq!(
+            events[3],
+            DecodedStdinEvent::KittyKey(
+                KeyWithModifier::new(BareKey::Char(']')).with_alt_modifier(),
+                b"\x1b[93;3u".to_vec(),
+            )
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_containing_kitty_sequences_and_split_end_marker() {
+        use super::{DecodedStdinEvent, StdinKeyDecoder};
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+        use zellij_utils::vendored::termwiz::input::InputEvent;
+
+        let mut dec = StdinKeyDecoder::new(false);
+        assert!(dec.feed(b"\x1b[200~literal \x1b[107;5u\x1b[20").is_empty());
+        let events = dec.feed(b"1~\x1b[91;3u");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            DecodedStdinEvent::Termwiz(InputEvent::Paste(s), _) if s == "literal \x1b[107;5u"
+        ));
+        assert_eq!(
+            events[1],
+            DecodedStdinEvent::KittyKey(
+                KeyWithModifier::new(BareKey::Char('[')).with_alt_modifier(),
+                b"\x1b[91;3u".to_vec(),
+            )
+        );
+    }
+
+    #[test]
+    fn lone_esc_flushes_on_fast_timeout() {
+        use super::{DecodedStdinEvent, PendingInputState, StdinKeyDecoder};
+        use zellij_utils::vendored::termwiz::input::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let mut dec = StdinKeyDecoder::new(false);
+        assert!(dec.feed(b"\x1b").is_empty());
+        assert_eq!(dec.pending_state(), PendingInputState::FastTimeout);
+        let events = dec.flush_fast_timeout();
+        assert_eq!(
+            events,
+            vec![DecodedStdinEvent::Termwiz(
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Escape,
+                    modifiers: Modifiers::NONE,
+                }),
+                b"\x1b".to_vec(),
+            )]
+        );
+        assert_eq!(dec.pending_state(), PendingInputState::None);
+    }
+
+    #[test]
+    fn kitty_event_type_subparams_keep_press_and_repeat_but_drop_release() {
+        use super::{DecodedStdinEvent, StdinKeyDecoder};
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+
+        let mut dec = StdinKeyDecoder::new(false);
+        // press (:1 with associated text ;107), repeat (:2), release (:3), bare release (1:3)
+        let events = dec.feed(b"\x1b[107;5:1;107u\x1b[107;5:2u\x1b[107;5:3u\x1b[97;1:3u");
+        assert_eq!(
+            events,
+            vec![
+                DecodedStdinEvent::KittyKey(
+                    KeyWithModifier::new(BareKey::Char('k')).with_ctrl_modifier(),
+                    b"\x1b[107;5:1;107u".to_vec(),
+                ),
+                DecodedStdinEvent::KittyKey(
+                    KeyWithModifier::new(BareKey::Char('k')).with_ctrl_modifier(),
+                    b"\x1b[107;5:2u".to_vec(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ansi_scrubber_plus_key_decoder_under_every_split_offset() {
+        use super::{DecodedStdinEvent, StdinAnsiParser, StdinKeyDecoder};
+        use zellij_utils::data::{BareKey, KeyWithModifier};
+
+        let stream = b"\x1b[107;5u".repeat(12);
+        for chunk_size in 1..=17 {
+            let mut ansi = StdinAnsiParser::new();
+            let mut dec = StdinKeyDecoder::new(false);
+            let mut all_events = Vec::new();
+            for chunk in stream.chunks(chunk_size) {
+                let parsed = ansi.feed(chunk);
+                if !parsed.residue.is_empty() {
+                    all_events.extend(dec.feed(&parsed.residue));
+                }
+            }
+            assert_eq!(
+                all_events.len(),
+                12,
+                "chunk_size={} dropped or duplicated events",
+                chunk_size
+            );
+            for ev in all_events {
+                assert_eq!(
+                    ev,
+                    DecodedStdinEvent::KittyKey(
+                        KeyWithModifier::new(BareKey::Char('k')).with_ctrl_modifier(),
+                        b"\x1b[107;5u".to_vec(),
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_esc_prefixed_arrow_and_page_up_preserve_alt_modifier() {
+        use super::{DecodedStdinEvent, StdinKeyDecoder};
+        use zellij_utils::vendored::termwiz::input::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let mut dec = StdinKeyDecoder::new(false);
+        let events = dec.feed(b"\x1b\x1b[A\x1b\x1b[5~");
+        assert_eq!(
+            events,
+            vec![
+                DecodedStdinEvent::Termwiz(
+                    InputEvent::Key(KeyEvent {
+                        key: KeyCode::UpArrow,
+                        modifiers: Modifiers::ALT,
+                    }),
+                    b"\x1b\x1b[A".to_vec(),
+                ),
+                DecodedStdinEvent::Termwiz(
+                    InputEvent::Key(KeyEvent {
+                        key: KeyCode::PageUp,
+                        modifiers: Modifiers::ALT,
+                    }),
+                    b"\x1b\x1b[5~".to_vec(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn unrecognized_private_and_angle_csi_never_wedge_following_keys() {
+        use super::{DecodedStdinEvent, PendingInputState, StdinKeyDecoder};
+        use zellij_utils::vendored::termwiz::input::{InputEvent, KeyCode, KeyEvent, Modifiers};
+
+        let mut dec = StdinKeyDecoder::new(false);
+        assert!(dec.feed(b"\x1b[?1u\x1b[<u").is_empty());
+        assert_eq!(dec.pending_state(), PendingInputState::None);
+
+        let events = dec.feed(b"a");
+        assert_eq!(
+            events,
+            vec![DecodedStdinEvent::Termwiz(
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('a'),
+                    modifiers: Modifiers::NONE,
+                }),
+                b"a".to_vec(),
+            )]
+        );
     }
 }
