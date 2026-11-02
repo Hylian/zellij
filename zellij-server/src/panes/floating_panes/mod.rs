@@ -111,6 +111,18 @@ impl FloatingPanes {
             let _ = self.set_pane_frames();
         }
     }
+    pub fn has_active_link_hints(&self) -> bool {
+        self.panes.values().any(|p| p.has_active_link_hints())
+    }
+    pub fn clear_all_link_hints(&mut self) -> bool {
+        let mut cleared = false;
+        for pane in self.panes.values_mut() {
+            if pane.clear_link_hints() {
+                cleared = true;
+            }
+        }
+        cleared
+    }
     pub fn set_client_dimmed(&mut self, client_id: ClientId, dimmed: bool) {
         if dimmed {
             self.dimmed_clients.insert(client_id);

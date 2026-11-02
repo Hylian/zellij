@@ -5,7 +5,7 @@ use crate::panes::kitty_graphics::{
 use crate::panes::sixel::SixelImageStore;
 use crate::panes::LinkHandler;
 use crate::panes::{
-    grid::{Grid, PendingNotification},
+    grid::{Grid, LinkHintAction, LinkHintCandidate, LinkHintTarget, PendingNotification},
     nested_session_modal::GuestModalShortcuts,
     terminal_character::{render_first_run_banner, TerminalCharacter, EMPTY_TERMINAL_CHARACTER},
 };
@@ -555,6 +555,12 @@ impl Pane for TerminalPane {
                 modifier_text.push(']');
             }
             format!("SEARCHING: {}{}", self.search_term, modifier_text)
+        } else if let Some(hint_input) = self.grid.link_hint_input_buffer() {
+            if hint_input.is_empty() {
+                "HINTS: type label (Esc to cancel)".to_string()
+            } else {
+                format!("HINTS: {}", hint_input)
+            }
         } else {
             self.current_title()
         };
@@ -1214,6 +1220,35 @@ impl Pane for TerminalPane {
             // we do this so that the banner will be updated with the new theme colors
             self.render_first_run_banner();
         }
+    }
+    fn collect_link_hint_candidates(&self) -> Vec<LinkHintCandidate> {
+        self.grid.collect_link_hint_candidates()
+    }
+    fn set_active_link_hints(&mut self, targets: Vec<LinkHintTarget>) -> bool {
+        let activated = self.grid.set_active_link_hints(targets);
+        self.set_should_render(true);
+        activated
+    }
+    fn has_active_link_hints(&self) -> bool {
+        self.grid.has_active_link_hints()
+    }
+    fn clear_link_hints(&mut self) -> bool {
+        let cleared = self.grid.clear_link_hints();
+        if cleared {
+            self.set_should_render(true);
+        }
+        cleared
+    }
+    fn handle_link_hint_key(&mut self, key: &KeyWithModifier) -> LinkHintAction {
+        let action = self.grid.handle_link_hint_key(key);
+        self.set_should_render(true);
+        action
+    }
+    fn set_current_cwd(&mut self, cwd: std::path::PathBuf) {
+        self.grid.set_current_cwd(cwd);
+    }
+    fn current_cwd(&self) -> Option<std::path::PathBuf> {
+        self.grid.current_cwd.clone()
     }
     fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
         self.arrow_fonts = should_support_arrow_fonts;

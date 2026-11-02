@@ -460,6 +460,15 @@ pub enum ScreenInstruction {
     SelectCommandAtScrollPosition(ClientId, Option<NotificationEnd>),
     CopyLastCommandOutput(ClientId, Option<NotificationEnd>),
     ClearCommandOutputFlash(PaneId),
+    LinkHints(ClientId, Option<NotificationEnd>),
+    LinkHintKey(
+        ClientId,
+        Option<KeyWithModifier>,
+        Vec<u8>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        Option<NotificationEnd>,
+    ),
+    UpdatePaneCwd(PaneId, PathBuf),
     PageScrollUp(ClientId, Option<NotificationEnd>),
     PageScrollDown(ClientId, Option<NotificationEnd>),
     HalfPageScrollUp(ClientId, Option<NotificationEnd>),
@@ -1060,6 +1069,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ClearCommandOutputFlash(..) => {
                 ScreenContext::ClearCommandOutputFlash
             },
+            ScreenInstruction::LinkHints(..) => ScreenContext::LinkHints,
+            ScreenInstruction::LinkHintKey(..) => ScreenContext::LinkHintKey,
+            ScreenInstruction::UpdatePaneCwd(..) => ScreenContext::HandlePtyBytes,
             ScreenInstruction::PageScrollUp(..) => ScreenContext::PageScrollUp,
             ScreenInstruction::PageScrollDown(..) => ScreenContext::PageScrollDown,
             ScreenInstruction::HalfPageScrollUp(..) => ScreenContext::HalfPageScrollUp,
@@ -1638,6 +1650,7 @@ pub(crate) struct Screen {
     client_notification_protocols: HashMap<ClientId, NotificationProtocol>,
     host_notification_protocol: HostNotificationProtocol,
     client_host_terminal_env: HashMap<ClientId, BTreeMap<String, String>>,
+    pub link_hints_clients: std::sync::Arc<std::sync::Mutex<HashSet<ClientId>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1849,6 +1862,7 @@ impl Screen {
             client_notification_protocols: HashMap::new(),
             host_notification_protocol: HostNotificationProtocol::default(),
             client_host_terminal_env: HashMap::new(),
+            link_hints_clients: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -2041,6 +2055,11 @@ impl Screen {
     fn update_client_tab_focus(&mut self, client_id: ClientId, new_tab_index: usize) {
         match self.active_tab_ids.remove(&client_id) {
             Some(old_active_index) => {
+                if old_active_index != new_tab_index {
+                    if let Some(old_tab) = self.tabs.get_mut(&old_active_index) {
+                        old_tab.clear_all_link_hints();
+                    }
+                }
                 self.active_tab_ids.insert(client_id, new_tab_index);
                 let client_tab_history = self.tab_history.entry(client_id).or_insert_with(Vec::new);
                 client_tab_history.retain(|&e| e != new_tab_index);
@@ -4152,6 +4171,18 @@ impl Screen {
         }
     }
 
+    fn sync_link_hints_clients(&self) {
+        if let Ok(mut set) = self.link_hints_clients.lock() {
+            if !set.is_empty() {
+                set.retain(|client_id| {
+                    self.get_active_tab(*client_id)
+                        .map(|tab| tab.has_active_link_hints())
+                        .unwrap_or(false)
+                });
+            }
+        }
+    }
+
     pub fn render(&mut self, plugin_render_assets: Option<Vec<PluginRenderAsset>>) -> Result<()> {
         // here we schedule the RenderToClients background job which debounces renders every 10ms
         // rather than actually rendering
@@ -4160,6 +4191,7 @@ impl Screen {
         // message, triggering our render_to_clients method which does the actual rendering
 
         self.sync_nested_guest_fullscreen_state();
+        self.sync_link_hints_clients();
 
         let _ = self
             .bus
@@ -8089,6 +8121,7 @@ pub(crate) fn screen_thread_main(
     config: Config,
     debug: bool,
     default_layout: Box<Layout>,
+    link_hints_clients: std::sync::Arc<std::sync::Mutex<HashSet<ClientId>>>,
 ) -> Result<()> {
     // Resolve `theme_dark` / `theme_light` to concrete `Styling` from the
     // bundled themes BEFORE `config.options` is moved out below. These
@@ -8254,6 +8287,7 @@ pub(crate) fn screen_thread_main(
     screen.host_theme_dark_styling = host_theme_dark_styling;
     screen.host_theme_light_styling = host_theme_light_styling;
     screen.paste_buffer_read_enabled = dangerously_enable_paste_buffer_read;
+    screen.link_hints_clients = link_hints_clients;
     screen.set_host_notification_protocol(host_notification_protocol);
     if explicit_theme_hue.is_some() {
         screen
@@ -8616,6 +8650,32 @@ pub(crate) fn screen_thread_main(
                             )]));
                         continue;
                     }
+                }
+                let mut link_hint_consumed = false;
+                let mut link_hint_finished = false;
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| {
+                        if tab.has_active_link_hints() {
+                            let still_active = tab
+                                .handle_link_hint_key(&key_with_modifier, &raw_bytes, client_id)
+                                .unwrap_or(false);
+                            if !still_active {
+                                link_hint_finished = true;
+                            }
+                            link_hint_consumed = true;
+                        }
+                    }
+                );
+                if link_hint_finished {
+                    if let Ok(mut set) = screen.link_hints_clients.lock() {
+                        set.remove(&client_id);
+                    }
+                }
+                if link_hint_consumed {
+                    screen.render(None)?;
+                    continue;
                 }
                 let mut state_changed = false;
                 let client_input_mode = screen.get_client_input_mode(client_id);
@@ -9346,6 +9406,64 @@ pub(crate) fn screen_thread_main(
                     }
                 }
                 screen.render(None)?;
+            },
+            ScreenInstruction::LinkHints(client_id, _completion_tx) => {
+                let mut hints_active = false;
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| {
+                        hints_active = tab.start_link_hints(client_id);
+                    }
+                );
+                if let Ok(mut set) = screen.link_hints_clients.lock() {
+                    if hints_active {
+                        set.insert(client_id);
+                    } else {
+                        set.remove(&client_id);
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::LinkHintKey(
+                client_id,
+                key_with_modifier,
+                raw_bytes,
+                consumed,
+                _completion_tx,
+            ) => {
+                let mut hints_were_active = false;
+                let mut hints_still_active = false;
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| {
+                        if tab.has_active_link_hints() {
+                            hints_were_active = true;
+                            hints_still_active = tab
+                                .handle_link_hint_key(&key_with_modifier, &raw_bytes, client_id)
+                                .unwrap_or(false);
+                        }
+                    }
+                );
+                consumed.store(hints_were_active, std::sync::atomic::Ordering::Release);
+                if !hints_still_active {
+                    if let Ok(mut set) = screen.link_hints_clients.lock() {
+                        set.remove(&client_id);
+                    }
+                }
+                if hints_were_active {
+                    screen.render(None)?;
+                }
+            },
+            ScreenInstruction::UpdatePaneCwd(pane_id, cwd) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.update_pane_cwd(pane_id, cwd);
+                        break;
+                    }
+                }
             },
             ScreenInstruction::MovePane(
                 client_id,

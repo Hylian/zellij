@@ -64,6 +64,7 @@ macro_rules! parse_kdl_action_arguments {
                 "ScrollToNextPrompt" => Ok(Action::ScrollToNextPrompt),
                 "SelectCommandAtScrollPosition" => Ok(Action::SelectCommandAtScrollPosition),
                 "CopyLastCommandOutput" => Ok(Action::CopyLastCommandOutput),
+                "LinkHints" => Ok(Action::LinkHints),
                 "PageScrollUp" => Ok(Action::PageScrollUp),
                 "PageScrollDown" => Ok(Action::PageScrollDown),
                 "HalfPageScrollUp" => Ok(Action::HalfPageScrollUp),
@@ -754,6 +755,7 @@ impl Action {
                 Some(KdlNode::new("SelectCommandAtScrollPosition"))
             },
             Action::CopyLastCommandOutput => Some(KdlNode::new("CopyLastCommandOutput")),
+            Action::LinkHints => Some(KdlNode::new("LinkHints")),
             Action::PageScrollUp => Some(KdlNode::new("PageScrollUp")),
             Action::PageScrollDown => Some(KdlNode::new("PageScrollDown")),
             Action::HalfPageScrollUp => Some(KdlNode::new("HalfPageScrollUp")),
@@ -1592,6 +1594,9 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "CopyLastCommandOutput" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "LinkHints" => {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "PageScrollUp" => {

@@ -866,6 +866,8 @@ pub enum CliAction {
     SelectCommandAtScrollPosition,
     /// Copy the output of the last finished OSC 133 command to the clipboard.
     CopyLastCommandOutput,
+    /// Show keyboard link hints for file paths and hyperlinks in the visible viewport.
+    LinkHints,
     /// Toggle between fullscreen focus pane and normal layout.
     ToggleFullscreen {
         /// Target a specific pane by ID (eg. terminal_1, plugin_2, or 3)

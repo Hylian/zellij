@@ -1214,6 +1214,7 @@ impl From<crate::input::actions::Action>
             KeybindPipeAction,
             LaunchOrFocusPluginAction,
             LaunchPluginAction,
+            LinkHintsAction,
             ListClientsAction,
             ListPanesAction,
             ListTabsAction,
@@ -1467,6 +1468,7 @@ impl From<crate::input::actions::Action>
             crate::input::actions::Action::CopyLastCommandOutput => {
                 ActionType::CopyLastCommandOutput(CopyLastCommandOutputAction {})
             },
+            crate::input::actions::Action::LinkHints => ActionType::LinkHints(LinkHintsAction {}),
             crate::input::actions::Action::PageScrollUp => {
                 ActionType::PageScrollUp(PageScrollUpAction {})
             },
@@ -2365,6 +2367,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             ActionType::CopyLastCommandOutput(_) => {
                 Ok(crate::input::actions::Action::CopyLastCommandOutput)
             },
+            ActionType::LinkHints(_) => Ok(crate::input::actions::Action::LinkHints),
             ActionType::ScrollUpAt(scroll_action) => {
                 Ok(crate::input::actions::Action::ScrollUpAt {
                     position: scroll_action
