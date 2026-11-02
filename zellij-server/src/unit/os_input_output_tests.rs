@@ -67,11 +67,58 @@ fn get_cwd() {
     let server = make_server();
 
     let pid = std::process::id();
+    let cwd = server.get_cwd(pid);
+
     assert!(
-        server.get_cwd(pid).is_some(),
+        cwd.is_some(),
         "Get current working directory from PID {}",
         pid
     );
+    assert!(
+        server.get_cwd(u32::MAX).is_none(),
+        "Non-existent PID should return None"
+    );
+}
+
+#[test]
+fn get_cwds() {
+    let server = make_server();
+
+    let pid = std::process::id();
+    let (cwds, cmds) = server.get_cwds(vec![pid, u32::MAX]);
+
+    assert!(
+        cwds.contains_key(&pid),
+        "get_cwds should contain current PID {}",
+        pid
+    );
+    assert!(
+        cmds.contains_key(&pid),
+        "get_cwds should contain command line for current PID {}",
+        pid
+    );
+    assert!(!cwds.contains_key(&u32::MAX));
+    assert!(!cmds.contains_key(&u32::MAX));
+}
+
+#[test]
+fn proc_helpers_parse_cmdline_and_filter_invalid_cwd_paths() {
+    use crate::os_input_output::{is_valid_cwd_path, parse_proc_cmdline};
+    use std::path::Path;
+
+    assert_eq!(parse_proc_cmdline(b""), Vec::<String>::new());
+    assert_eq!(parse_proc_cmdline(b"\0\0"), Vec::<String>::new());
+    assert_eq!(
+        parse_proc_cmdline(b"zsh\0-i\0"),
+        vec!["zsh".to_string(), "-i".to_string()]
+    );
+
+    assert!(!is_valid_cwd_path(Path::new("")));
+    assert!(is_valid_cwd_path(Path::new("/")));
+    #[cfg(target_os = "linux")]
+    assert!(!is_valid_cwd_path(Path::new(
+        "/nonexistent/zellij_test_dir (deleted)"
+    )));
 }
 
 // --- Signal delivery tests ---
