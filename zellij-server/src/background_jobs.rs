@@ -65,6 +65,10 @@ pub enum BackgroundJob {
     ),
     HighlightPanesWithMessage(Vec<PaneId>, String),
     RenderToClients,
+    DrainSmoothScrollQueue {
+        tab_id: usize,
+        client_id: ClientId,
+    },
     QueryZellijWebServerStatus,
     ClearHelpText {
         client_id: ClientId,
@@ -95,6 +99,9 @@ impl From<&BackgroundJob> for BackgroundJobContext {
             BackgroundJob::WebRequest(..) => BackgroundJobContext::WebRequest,
             BackgroundJob::ReportPluginList(..) => BackgroundJobContext::ReportPluginList,
             BackgroundJob::RenderToClients => BackgroundJobContext::ReportPluginList,
+            BackgroundJob::DrainSmoothScrollQueue { .. } => {
+                BackgroundJobContext::DrainSmoothScrollQueue
+            },
             BackgroundJob::HighlightPanesWithMessage(..) => {
                 BackgroundJobContext::HighlightPanesWithMessage
             },
@@ -498,6 +505,17 @@ pub(crate) fn background_jobs_main(
                         }
                     });
                 }
+            },
+            BackgroundJob::DrainSmoothScrollQueue { tab_id, client_id } => {
+                runtime.spawn({
+                    let senders = bus.senders.clone();
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(14)).await;
+                        let _ = senders.send_to_screen(ScreenInstruction::DrainSmoothScrollQueue(
+                            tab_id, client_id,
+                        ));
+                    }
+                });
             },
             BackgroundJob::HighlightPanesWithMessage(pane_ids, text) => {
                 if job_already_running(job, &mut running_jobs) {

@@ -1006,6 +1006,8 @@ impl From<crate::input::options::Options>
                     crate::data::ThemeHue::Light => ProtoThemeHue::Light as i32,
                 }
             }),
+            scroll_acceleration_factor: options.scroll_acceleration_factor,
+            scroll_inertia: options.scroll_inertia,
         }
     }
 }
@@ -1153,6 +1155,8 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
                     }
                 })
                 .transpose()?,
+            scroll_acceleration_factor: options.scroll_acceleration_factor,
+            scroll_inertia: options.scroll_inertia,
         })
     }
 }

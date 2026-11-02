@@ -409,6 +409,16 @@ pub struct Options {
     #[clap(long, value_parser)]
     pub post_command_discovery_hook: Option<String>,
 
+    /// Max acceleration multiplier for rapid continuous scrolling (default is 3.5)
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub scroll_acceleration_factor: Option<f32>,
+
+    /// Enable or disable inertial scrolling momentum after trackpad swipe (default is true)
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub scroll_inertia: Option<bool>,
+
     /// Number of async worker tasks to spawn per active client.
     ///
     /// Allocating few tasks may result in resource contention and lags. Small values (around 4)
@@ -602,6 +612,10 @@ impl Options {
         let dangerously_enable_paste_buffer_read = other
             .dangerously_enable_paste_buffer_read
             .or(self.dangerously_enable_paste_buffer_read);
+        let scroll_acceleration_factor = other
+            .scroll_acceleration_factor
+            .or(self.scroll_acceleration_factor);
+        let scroll_inertia = other.scroll_inertia.or(self.scroll_inertia);
 
         Options {
             simplified_ui,
@@ -660,6 +674,8 @@ impl Options {
             web_server_key,
             enforce_https_for_localhost,
             post_command_discovery_hook,
+            scroll_acceleration_factor,
+            scroll_inertia,
             client_async_worker_tasks,
             nested_session_handling,
             dangerously_enable_paste_buffer_read,
@@ -773,6 +789,10 @@ impl Options {
         let dangerously_enable_paste_buffer_read = other
             .dangerously_enable_paste_buffer_read
             .or(self.dangerously_enable_paste_buffer_read);
+        let scroll_acceleration_factor = other
+            .scroll_acceleration_factor
+            .or(self.scroll_acceleration_factor);
+        let scroll_inertia = merge_bool(other.scroll_inertia, self.scroll_inertia);
 
         Options {
             simplified_ui,
@@ -831,6 +851,8 @@ impl Options {
             web_server_key,
             enforce_https_for_localhost,
             post_command_discovery_hook,
+            scroll_acceleration_factor,
+            scroll_inertia,
             client_async_worker_tasks,
             nested_session_handling,
             dangerously_enable_paste_buffer_read,
