@@ -9354,3 +9354,102 @@ fn a_character_wider_than_two_columns_advances_the_cursor_by_its_full_width() {
     assert_eq!(row.width(), 4);
     assert_eq!(cursor_position(&grid), Some((4, 0)));
 }
+
+#[test]
+fn osc133_multiline_prompt_scroll_navigation_jumps_per_logical_prompt() {
+    let mut content: Vec<u8> = Vec::new();
+    for i in 1..=3 {
+        content.extend_from_slice(
+            format!(
+                "\x1b]133;A\x07~/dir-{i}\r\n\x1b]133;A\x07$ \x1b]133;B\x07cmd-{i}\x1b]133;C\x07\r\nout-{i}a\r\nout-{i}b\r\nout-{i}c\x1b]133;D;0\x07\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    content.extend_from_slice(b"\x1b]133;A\x07~/dir-4\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+    let mut grid = create_grid_with_size_and_raw(5, 40, &content);
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-3");
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-2");
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-1");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-2");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "~/dir-3");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert!(!grid.is_scrolled);
+}
+
+#[test]
+fn osc133_inplace_prompt_redraw_deduplicates_open_prompt_markers() {
+    let mut grid = create_grid_with_content(
+        "\x1b]133;A\x07$ \x1b]133;B\x07\r\x1b]133;A\x07[venv] $ \x1b]133;B\x07echo ok\x1b]133;C\x07\r\nok\x1b]133;D;0\x07",
+    );
+
+    assert_eq!(grid.viewport[0].osc133_markers.len(), 3);
+    assert_eq!(
+        select_with_click_count(&mut grid, Position::new(1, 0), 3),
+        "echo ok\nok"
+    );
+}
+
+#[test]
+fn osc133_right_prompt_preserves_primary_prompt_and_input_markers() {
+    let mut grid = create_grid_with_size_and_raw(
+        5,
+        40,
+        b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b[1;30H\x1b]133;P;k=r\x0712:00\x1b[1;3Hecho hi\x1b]133;C\x07\r\nhi\x1b]133;D;0\x07",
+    );
+
+    assert_eq!(
+        select_with_click_count(&mut grid, Position::new(1, 0), 3),
+        "echo hi                    12:00\nhi"
+    );
+}
+
+#[test]
+fn osc133_prompt_only_shell_navigates_each_prompt_without_skipping() {
+    let mut content: Vec<u8> = Vec::new();
+    for i in 1..=3 {
+        content.extend_from_slice(
+            format!("\x1b]133;A\x07$ cmd-{i}\r\nout-{i}a\r\nout-{i}b\r\nout-{i}c\r\n").as_bytes(),
+        );
+    }
+    content.extend_from_slice(b"\x1b]133;A\x07$ ");
+    let mut grid = create_grid_with_size_and_raw(4, 40, &content);
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "$ cmd-3");
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "$ cmd-2");
+
+    assert!(grid.scroll_to_previous_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "$ cmd-1");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "$ cmd-2");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert_eq!(viewport_texts(&grid)[0], "$ cmd-3");
+
+    assert!(grid.scroll_to_next_prompt());
+    assert!(!grid.is_scrolled);
+}
+
+#[test]
+fn osc133_unconsumed_overwrite_protection_clears_on_subsequent_carriage_return() {
+    let grid = create_grid_with_content(
+        "old-text\r\x1b]133;A\x07\x1b[2C$ \x1b]133;B\x07cmd\x1b]133;C\x07out\runmarked-full-overwrite",
+    );
+
+    assert!(grid.viewport[0].osc133_markers.as_slice().is_empty());
+}
