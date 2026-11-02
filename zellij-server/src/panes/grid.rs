@@ -2741,6 +2741,13 @@ impl Grid {
         }
     }
     pub fn move_cursor_to_beginning_of_line(&mut self) {
+        if self.cursor.x > 0 {
+            if let Some(row) = self.viewport.get_mut(self.cursor.y) {
+                for marker in row.osc133_markers.iter_mut() {
+                    marker.overwrite_protected = false;
+                }
+            }
+        }
         self.cursor.x = 0;
     }
     pub fn add_character_at_cursor_position(
@@ -4001,30 +4008,99 @@ impl Grid {
             return None;
         }
         let first_line = -(self.lines_above.len() as isize);
+        let mut prompt_candidate: Option<usize> = None;
         let mut input_candidate: Option<usize> = None;
+        let mut in_input_prompt = false;
+        let mut last_prompt_line: Option<isize> = None;
+        if let Some(top_row) = self.row_at(0) {
+            for marker in top_row.osc133_markers.iter() {
+                match marker.kind {
+                    Osc133MarkerKind::Prompt => {
+                        last_prompt_line = Some(0);
+                    },
+                    Osc133MarkerKind::Input => {
+                        in_input_prompt = true;
+                    },
+                    Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {
+                        break;
+                    },
+                }
+            }
+        }
         let mut display_delta = 0;
         for line in (first_line..0).rev() {
             let Some(row) = self.row_at(line) else {
                 continue;
             };
             display_delta += 1;
+            let mut saw_prompt_on_row = false;
             for marker in row.osc133_markers.iter().rev() {
                 match marker.kind {
-                    Osc133MarkerKind::Prompt => return Some(display_delta),
+                    Osc133MarkerKind::Prompt => {
+                        saw_prompt_on_row = true;
+                        if !in_input_prompt {
+                            return Some(display_delta);
+                        }
+                        if last_prompt_line.is_none() || last_prompt_line == Some(line + 1) {
+                            prompt_candidate = Some(display_delta);
+                            last_prompt_line = Some(line);
+                        } else if let Some(candidate) = prompt_candidate {
+                            return Some(candidate);
+                        } else {
+                            return Some(display_delta);
+                        }
+                    },
                     Osc133MarkerKind::Input => {
+                        if let Some(candidate) = prompt_candidate {
+                            return Some(candidate);
+                        }
                         if input_candidate.is_none() {
                             input_candidate = Some(display_delta);
                         }
+                        in_input_prompt = true;
+                        last_prompt_line = None;
                     },
                     Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {
-                        if let Some(candidate) = input_candidate {
+                        if let Some(candidate) = prompt_candidate.or(input_candidate) {
                             return Some(candidate);
+                        }
+                        in_input_prompt = false;
+                        last_prompt_line = None;
+                    },
+                }
+            }
+            if !saw_prompt_on_row && last_prompt_line.is_some() {
+                if let Some(candidate) = prompt_candidate {
+                    return Some(candidate);
+                }
+                in_input_prompt = false;
+                last_prompt_line = None;
+            }
+        }
+        prompt_candidate.or(input_candidate)
+    }
+
+    fn open_multiline_prompt_has_closing_input(&self, start_line: isize, last_line: isize) -> bool {
+        let mut prev_prompt_line = start_line;
+        for line in (start_line + 1)..=last_line {
+            let Some(row) = self.row_at(line) else {
+                continue;
+            };
+            for marker in row.osc133_markers.iter() {
+                match marker.kind {
+                    Osc133MarkerKind::Input => return true,
+                    Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => return false,
+                    Osc133MarkerKind::Prompt => {
+                        if prev_prompt_line + 1 == line {
+                            prev_prompt_line = line;
+                        } else {
+                            return false;
                         }
                     },
                 }
             }
         }
-        input_candidate
+        false
     }
 
     fn next_prompt_line_delta(&self) -> Option<usize> {
@@ -4032,17 +4108,42 @@ impl Grid {
             return None;
         }
         let last_line = (self.viewport.len() + self.lines_below.len()) as isize - 1;
+        let mut top_row_has_unclosed_prompt = false;
+        if let Some(top_row) = self.row_at(0) {
+            for marker in top_row.osc133_markers.iter() {
+                match marker.kind {
+                    Osc133MarkerKind::Prompt => top_row_has_unclosed_prompt = true,
+                    Osc133MarkerKind::Input
+                    | Osc133MarkerKind::Output
+                    | Osc133MarkerKind::End(_) => top_row_has_unclosed_prompt = false,
+                }
+            }
+        }
+        let mut in_open_prompt = top_row_has_unclosed_prompt
+            && self.open_multiline_prompt_has_closing_input(0, last_line);
         for line in 1..=last_line {
             let Some(row) = self.row_at(line) else {
                 continue;
             };
             for marker in row.osc133_markers.iter() {
                 match marker.kind {
-                    Osc133MarkerKind::Prompt | Osc133MarkerKind::Input => {
-                        let reachable_delta = (line as usize).min(self.lines_below.len());
-                        return (reachable_delta > 0).then_some(reachable_delta);
+                    Osc133MarkerKind::Prompt => {
+                        if !in_open_prompt {
+                            let reachable_delta = (line as usize).min(self.lines_below.len());
+                            return (reachable_delta > 0).then_some(reachable_delta);
+                        }
                     },
-                    Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {},
+                    Osc133MarkerKind::Input => {
+                        if in_open_prompt {
+                            in_open_prompt = false;
+                        } else {
+                            let reachable_delta = (line as usize).min(self.lines_below.len());
+                            return (reachable_delta > 0).then_some(reachable_delta);
+                        }
+                    },
+                    Osc133MarkerKind::Output | Osc133MarkerKind::End(_) => {
+                        in_open_prompt = false;
+                    },
                 }
             }
         }
@@ -4204,7 +4305,9 @@ impl Grid {
             return;
         }
         let marker = match &mark.kind {
-            MarkKind::PromptStart { .. } => Some(Osc133MarkerKind::Prompt),
+            MarkKind::PromptStart { .. } => (mark.options.prompt_kind()
+                != Some(crate::attention::shell::PromptKind::Right))
+            .then_some(Osc133MarkerKind::Prompt),
             MarkKind::InputStart => Some(Osc133MarkerKind::Input),
             MarkKind::CommandStart { .. } => Some(Osc133MarkerKind::Output),
             MarkKind::CommandEnd { exit_code, .. } => Some(Osc133MarkerKind::End(*exit_code)),
@@ -6801,6 +6904,7 @@ enum Osc133MarkerKind {
 struct Osc133Marker {
     column: usize,
     kind: Osc133MarkerKind,
+    overwrite_protected: bool,
 }
 
 impl Debug for Row {
@@ -7108,7 +7212,14 @@ impl Row {
             if let Some(existing) = self.columns.get(x) {
                 let replacing_blank = existing.character == ' ';
                 if !self.osc133_markers.is_empty() {
-                    self.osc133_markers.retain(|marker| {
+                    self.osc133_markers.retain_mut(|marker| {
+                        if keep_marker_on_replaced_blank
+                            && marker.column == x
+                            && marker.overwrite_protected
+                        {
+                            marker.overwrite_protected = false;
+                            return true;
+                        }
                         marker.column != x || (keep_marker_on_replaced_blank && replacing_blank)
                     });
                 }
@@ -7133,7 +7244,14 @@ impl Row {
         let overwrite_start = start;
         let overwrite_end = covered_end.max(new_end);
         if !self.osc133_markers.is_empty() {
-            self.osc133_markers.retain(|marker| {
+            self.osc133_markers.retain_mut(|marker| {
+                if keep_marker_on_replaced_blank
+                    && marker.column == overwrite_start
+                    && marker.overwrite_protected
+                {
+                    marker.overwrite_protected = false;
+                    return true;
+                }
                 marker.column < overwrite_start
                     || marker.column >= overwrite_end
                     || (keep_marker_on_replaced_blank
@@ -7422,7 +7540,38 @@ impl Row {
         parts
     }
     fn add_osc133_marker(&mut self, column: usize, kind: Osc133MarkerKind) {
-        self.osc133_markers.push(Osc133Marker { column, kind });
+        let overwrite_protected = column < self.width();
+        let last_command_boundary = self
+            .osc133_markers
+            .iter()
+            .rposition(|m| matches!(m.kind, Osc133MarkerKind::Output | Osc133MarkerKind::End(_)));
+        let open_prompt_start = last_command_boundary.map_or(0, |idx| idx + 1);
+        if matches!(kind, Osc133MarkerKind::Prompt)
+            && self.osc133_markers.as_slice()[open_prompt_start..]
+                .iter()
+                .any(|m| matches!(m.kind, Osc133MarkerKind::Prompt) && m.column < column)
+        {
+            return;
+        }
+        let mut index = 0;
+        self.osc133_markers.retain(|m| {
+            let keep = if matches!(kind, Osc133MarkerKind::Prompt) && index >= open_prompt_start {
+                !(m.column >= column
+                    && matches!(m.kind, Osc133MarkerKind::Prompt | Osc133MarkerKind::Input))
+            } else if matches!(kind, Osc133MarkerKind::Input) && index >= open_prompt_start {
+                !matches!(m.kind, Osc133MarkerKind::Input)
+            } else {
+                !(m.column == column
+                    && std::mem::discriminant(&m.kind) == std::mem::discriminant(&kind))
+            };
+            index += 1;
+            keep
+        });
+        self.osc133_markers.push(Osc133Marker {
+            column,
+            kind,
+            overwrite_protected,
+        });
         self.osc133_markers.sort_by_key(|marker| marker.column);
     }
     pub fn last_index_in_line(&self) -> usize {
