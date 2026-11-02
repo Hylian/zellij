@@ -8,6 +8,7 @@ use crate::os_input_output_unix::UnixPtyBackend as PtyBackendImpl;
 use crate::os_input_output_windows::WindowsPtyBackend as PtyBackendImpl;
 
 use interprocess;
+#[cfg(not(target_os = "linux"))]
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tempfile::tempfile;
 use zellij_utils::{
@@ -573,53 +574,82 @@ impl ServerOsApi for ServerOsInputOutput {
     }
 
     fn get_cwd(&self, pid: u32) -> Option<PathBuf> {
-        let mut system_info = System::new();
-        let sysinfo_pid = sysinfo::Pid::from_u32(pid);
-        let refresh_kind = ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always);
-        system_info.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&[sysinfo_pid]),
-            false,
-            refresh_kind,
-        );
-
-        if let Some(process) = system_info.process(sysinfo_pid) {
-            if let Some(cwd) = process.cwd() {
-                return Some(cwd.to_path_buf());
-            }
+        #[cfg(target_os = "linux")]
+        {
+            return get_process_cwd(pid).ok().flatten();
         }
-        None
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut system_info = System::new();
+            let sysinfo_pid = sysinfo::Pid::from_u32(pid);
+            let refresh_kind = ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always);
+            system_info.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[sysinfo_pid]),
+                false,
+                refresh_kind,
+            );
+
+            if let Some(process) = system_info.process(sysinfo_pid) {
+                if let Some(cwd) = process.cwd() {
+                    if is_valid_cwd_path(cwd) {
+                        return Some(cwd.to_path_buf());
+                    }
+                }
+            }
+            None
+        }
     }
 
     fn get_cwds(&self, pids: Vec<u32>) -> (HashMap<u32, PathBuf>, HashMap<u32, Vec<String>>) {
-        let mut system_info = System::new();
         let mut cwds = HashMap::new();
         let mut cmds = HashMap::new();
 
-        let sysinfo_pids: Vec<sysinfo::Pid> =
-            pids.iter().map(|&p| sysinfo::Pid::from_u32(p)).collect();
-        let refresh_kind = ProcessRefreshKind::nothing()
-            .with_cwd(UpdateKind::Always)
-            .with_cmd(UpdateKind::Always);
-        system_info.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&sysinfo_pids),
-            false,
-            refresh_kind,
-        );
-
-        for pid in pids {
-            let sysinfo_pid = sysinfo::Pid::from_u32(pid);
-            if let Some(process) = system_info.process(sysinfo_pid) {
-                if let Some(cwd) = process.cwd() {
-                    cwds.insert(pid, cwd.to_path_buf());
+        #[cfg(target_os = "linux")]
+        {
+            for pid in pids {
+                if let Ok(Some(cwd)) = get_process_cwd(pid) {
+                    cwds.insert(pid, cwd);
                 }
-                let cmd = process.cmd();
-                if !cmd.is_empty() {
-                    cmds.insert(
-                        pid,
-                        cmd.iter()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .collect(),
-                    );
+                if let Ok(cmd) = get_process_cmd(pid) {
+                    if !cmd.is_empty() {
+                        cmds.insert(pid, cmd);
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        if !pids.is_empty() {
+            let mut system_info = System::new();
+            let sysinfo_pids: Vec<sysinfo::Pid> =
+                pids.iter().map(|&p| sysinfo::Pid::from_u32(p)).collect();
+            let refresh_kind = ProcessRefreshKind::nothing()
+                .with_cwd(UpdateKind::Always)
+                .with_cmd(UpdateKind::Always);
+            system_info.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&sysinfo_pids),
+                false,
+                refresh_kind,
+            );
+
+            for pid in pids {
+                let sysinfo_pid = sysinfo::Pid::from_u32(pid);
+                if let Some(process) = system_info.process(sysinfo_pid) {
+                    if let Some(cwd) = process.cwd() {
+                        if is_valid_cwd_path(cwd) {
+                            cwds.insert(pid, cwd.to_path_buf());
+                        }
+                    }
+                    let cmd = process.cmd();
+                    if !cmd.is_empty() {
+                        cmds.insert(
+                            pid,
+                            cmd.iter()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .collect(),
+                        );
+                    }
                 }
             }
         }
@@ -667,33 +697,48 @@ impl ServerOsApi for ServerOsInputOutput {
             return HashMap::new();
         }
 
-        let sysinfo_pids: Vec<sysinfo::Pid> = terminal_to_fg_pid
-            .values()
-            .map(|&p| sysinfo::Pid::from_u32(p))
-            .collect();
-        let mut system_info = System::new();
-        let refresh_kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
-        system_info.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&sysinfo_pids),
-            false,
-            refresh_kind,
-        );
-
         let mut cmds = HashMap::new();
-        for (terminal_id, fg_pid) in terminal_to_fg_pid {
-            let Some(process) = system_info.process(sysinfo::Pid::from_u32(fg_pid)) else {
-                continue;
-            };
-            let command: Vec<String> = process
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy().into_owned())
-                .collect();
-            if command.is_empty() {
-                continue;
+
+        #[cfg(target_os = "linux")]
+        {
+            for (terminal_id, fg_pid) in terminal_to_fg_pid {
+                if let Ok(cmd) = get_process_cmd(fg_pid) {
+                    if !cmd.is_empty() {
+                        cmds.insert(terminal_id, apply_post_command_hook(cmd, post_hook));
+                    }
+                }
             }
-            let command = apply_post_command_hook(command, post_hook);
-            cmds.insert(terminal_id, command);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let sysinfo_pids: Vec<sysinfo::Pid> = terminal_to_fg_pid
+                .values()
+                .map(|&p| sysinfo::Pid::from_u32(p))
+                .collect();
+            let mut system_info = System::new();
+            let refresh_kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+            system_info.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&sysinfo_pids),
+                false,
+                refresh_kind,
+            );
+
+            for (terminal_id, fg_pid) in terminal_to_fg_pid {
+                let Some(process) = system_info.process(sysinfo::Pid::from_u32(fg_pid)) else {
+                    continue;
+                };
+                let command: Vec<String> = process
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect();
+                if command.is_empty() {
+                    continue;
+                }
+                let command = apply_post_command_hook(command, post_hook);
+                cmds.insert(terminal_id, command);
+            }
         }
         cmds
     }
@@ -781,6 +826,38 @@ pub fn get_server_os_input() -> Result<ServerOsInputOutput, std::io::Error> {
 
 use crate::pty_writer::PtyWriteInstruction;
 use crate::thread_bus::ThreadSenders;
+
+pub(crate) fn is_valid_cwd_path(cwd: &std::path::Path) -> bool {
+    if cwd.as_os_str().is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    if cwd.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") && !cwd.is_dir() {
+        return false;
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn get_process_cwd(pid: u32) -> io::Result<Option<PathBuf>> {
+    let cwd = std::fs::read_link(format!("/proc/{}/cwd", pid))?;
+    Ok(is_valid_cwd_path(&cwd).then_some(cwd))
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn parse_proc_cmdline(content: &[u8]) -> Vec<String> {
+    content
+        .split(|&b| b == 0)
+        .filter(|slice| !slice.is_empty())
+        .map(|slice| String::from_utf8_lossy(slice).into_owned())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn get_process_cmd(pid: u32) -> io::Result<Vec<String>> {
+    let content = std::fs::read(format!("/proc/{}/cmdline", pid))?;
+    Ok(parse_proc_cmdline(&content))
+}
 
 pub struct ResizeCache {
     senders: ThreadSenders,
