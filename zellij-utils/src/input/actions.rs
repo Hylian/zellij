@@ -1281,6 +1281,12 @@ impl Action {
                 },
                 None => Ok(vec![Action::HalfPageScrollDown]),
             },
+            CliAction::ScrollToPreviousPrompt => Ok(vec![Action::ScrollToPreviousPrompt]),
+            CliAction::ScrollToNextPrompt => Ok(vec![Action::ScrollToNextPrompt]),
+            CliAction::SelectCommandAtScrollPosition => {
+                Ok(vec![Action::SelectCommandAtScrollPosition])
+            },
+            CliAction::CopyLastCommandOutput => Ok(vec![Action::CopyLastCommandOutput]),
             CliAction::ToggleFullscreen { pane_id } => match pane_id {
                 Some(pane_id_str) => {
                     let pane_id = PaneId::from_str(&pane_id_str)
@@ -4944,5 +4950,31 @@ mod tests {
     fn test_set_resurrect_command_rejects_malformed_pane_id() {
         let result = set_resurrect_command_from_cli(Some("nope"), None, false, vec!["opencode"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_osc133_prompt_cli_actions_convert() {
+        let cases = [
+            (
+                CliAction::ScrollToPreviousPrompt,
+                Action::ScrollToPreviousPrompt,
+            ),
+            (CliAction::ScrollToNextPrompt, Action::ScrollToNextPrompt),
+            (
+                CliAction::SelectCommandAtScrollPosition,
+                Action::SelectCommandAtScrollPosition,
+            ),
+            (
+                CliAction::CopyLastCommandOutput,
+                Action::CopyLastCommandOutput,
+            ),
+        ];
+
+        for (cli_action, expected_action) in cases {
+            let actions =
+                Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None)
+                    .unwrap();
+            assert_eq!(actions, vec![expected_action]);
+        }
     }
 }

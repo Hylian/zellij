@@ -20322,3 +20322,68 @@ fn a_client_following_row_shifts_ends_up_with_the_same_screen_as_a_full_repaint(
     );
     assert_eq!(client.screen(), expected.screen());
 }
+
+#[test]
+pub fn prompt_navigation_cli_actions_sync_scroll_mode() {
+    let size = Size { cols: 80, rows: 10 };
+    let mut initial_layout = TiledPaneLayout::default();
+    initial_layout.children_split_direction = SplitDirection::Vertical;
+    initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
+    let mut mock_screen = MockScreen::new(size);
+    let client_id = mock_screen.main_client_id;
+    let session_metadata = mock_screen.clone_session_metadata();
+    let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let received_server_instructions = Arc::new(Mutex::new(vec![]));
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    let server_thread = log_actions_in_thread!(
+        received_server_instructions,
+        ServerInstruction::KillSession,
+        server_receiver
+    );
+
+    let mut pane_contents = String::from("\x1b]133;A\x07$ \x1b]133;B\x07seq 20\x1b]133;C\x07\r\n");
+    for i in 0..20 {
+        pane_contents.push_str(&format!("output line {}\r\n", i));
+    }
+    pane_contents.push_str("\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    let _ = mock_screen.to_screen.send(ScreenInstruction::PtyBytes(
+        0,
+        pane_contents.as_bytes().to_vec(),
+    ));
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ChangeMode(
+        InputMode::Normal,
+        None,
+        client_id,
+        None,
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    send_cli_action_to_server(
+        &session_metadata,
+        CliAction::ScrollToPreviousPrompt,
+        client_id,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        last_change_mode_for_client(&received_server_instructions, client_id),
+        Some(InputMode::Scroll),
+        "jumping up to a previous prompt into scrollback should enter Scroll mode",
+    );
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ChangeMode(
+        InputMode::Scroll,
+        None,
+        client_id,
+        None,
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    send_cli_action_to_server(&session_metadata, CliAction::ScrollToNextPrompt, client_id);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        last_change_mode_for_client(&received_server_instructions, client_id),
+        Some(InputMode::Normal),
+        "jumping forward to the active prompt at the bottom should return to Normal mode",
+    );
+
+    mock_screen.teardown(vec![server_thread, screen_thread]);
+}

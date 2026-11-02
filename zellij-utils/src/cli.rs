@@ -1382,6 +1382,14 @@ pub enum CliAction {
         #[clap(short, long, value_parser)]
         pane_id: Option<String>,
     },
+    /// Scroll up to the previous OSC 133 shell prompt in the focused pane.
+    ScrollToPreviousPrompt,
+    /// Scroll down to the next OSC 133 shell prompt in the focused pane.
+    ScrollToNextPrompt,
+    /// Select the output of the command nearest the top of the current scroll viewport.
+    SelectCommandAtScrollPosition,
+    /// Copy the output of the last finished OSC 133 command to the clipboard.
+    CopyLastCommandOutput,
     /// Toggle between fullscreen focus pane and normal layout.
     ToggleFullscreen {
         /// Target a specific pane by ID (eg. terminal_1, plugin_2, or 3)
@@ -2470,5 +2478,34 @@ mod tests {
     #[test]
     fn set_resurrect_command_requires_command_or_clear() {
         assert!(parse_set_resurrect_command(&[]).is_err());
+    }
+
+    #[test]
+    fn osc133_prompt_actions_parse_from_cli() {
+        let cases = [
+            (
+                "scroll-to-previous-prompt",
+                CliAction::ScrollToPreviousPrompt,
+            ),
+            ("scroll-to-next-prompt", CliAction::ScrollToNextPrompt),
+            (
+                "select-command-at-scroll-position",
+                CliAction::SelectCommandAtScrollPosition,
+            ),
+            ("copy-last-command-output", CliAction::CopyLastCommandOutput),
+        ];
+
+        for (subcommand, expected) in cases {
+            let cli = try_parse(&["action", subcommand]).unwrap();
+            match cli.command {
+                Some(Command::Action(action)) => {
+                    assert_eq!(
+                        std::mem::discriminant(&*action),
+                        std::mem::discriminant(&expected)
+                    );
+                },
+                other => panic!("Expected Command::Action for {subcommand}, got {other:?}"),
+            }
+        }
     }
 }
