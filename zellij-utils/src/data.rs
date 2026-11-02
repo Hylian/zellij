@@ -321,7 +321,8 @@ impl FromStr for KeyModifier {
 
 impl BareKey {
     pub fn from_bytes_with_u(bytes: &[u8]) -> Option<Self> {
-        match str::from_utf8(bytes) {
+        let primary = bytes.split(|&b| b == b':').next().unwrap_or(bytes);
+        match str::from_utf8(primary) {
             Ok("27") => Some(BareKey::Esc),
             Ok("13") => Some(BareKey::Enter),
             Ok("9") => Some(BareKey::Tab),
@@ -367,7 +368,8 @@ impl BareKey {
         }
     }
     pub fn from_bytes_with_tilde(bytes: &[u8]) -> Option<Self> {
-        match str::from_utf8(bytes) {
+        let primary = bytes.split(|&b| b == b':').next().unwrap_or(bytes);
+        match str::from_utf8(primary) {
             Ok("2") => Some(BareKey::Insert),
             Ok("3") => Some(BareKey::Delete),
             Ok("5") => Some(BareKey::PageUp),
@@ -423,7 +425,11 @@ bitflags::bitflags! {
 
 impl KeyModifier {
     pub fn from_bytes(bytes: &[u8]) -> BTreeSet<KeyModifier> {
-        let modifier_flags = str::from_utf8(bytes)
+        let primary = bytes
+            .split(|&b| b == b';' || b == b':')
+            .next()
+            .unwrap_or(bytes);
+        let modifier_flags = str::from_utf8(primary)
             .ok() // convert to string: (eg. "16")
             .and_then(|s| u8::from_str_radix(&s, 10).ok()) // convert to u8: (eg. 16)
             .map(|s| s.saturating_sub(1)) // subtract 1: (eg. 15)
