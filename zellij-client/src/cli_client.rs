@@ -29,7 +29,10 @@ pub fn start_cli_client(
         sock_dir
     };
     crate::check_ipc_pipe_length(&zellij_ipc_pipe);
-    os_input.connect_to_server(&*zellij_ipc_pipe);
+    if let Err(e) = os_input.connect_to_existing_server(&*zellij_ipc_pipe) {
+        eprintln!("Failed to connect to session '{}': {}", session_name, e);
+        return 1;
+    }
     let pane_id = os_input
         .env_variable("ZELLIJ_PANE_ID")
         .and_then(|e| e.trim().parse().ok());
@@ -203,6 +206,9 @@ fn pipe_client(
                         process::exit(0);
                     },
                 },
+                None => {
+                    process::exit(1);
+                },
                 _ => {},
             }
         }
@@ -253,6 +259,9 @@ fn individual_messages_client(
                     return None;
                 },
             },
+            None => {
+                return Some(1);
+            },
             _ => {},
         }
     }
@@ -271,7 +280,10 @@ pub fn start_subscribe_client(
         sock_dir
     };
     crate::check_ipc_pipe_length(&zellij_ipc_pipe);
-    os_input.connect_to_server(&*zellij_ipc_pipe);
+    if let Err(e) = os_input.connect_to_existing_server(&*zellij_ipc_pipe) {
+        eprintln!("Failed to connect to session '{}': {}", session_name, e);
+        process::exit(1);
+    }
 
     // Parse pane IDs
     let pane_ids: Vec<PaneId> = subscribe_cli
@@ -363,4 +375,85 @@ pub fn start_subscribe_client(
     }
 
     os_input.send_to_server(ClientToServerMsg::ClientExited);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zellij_utils::data::Palette;
+    use zellij_utils::errors::ErrorContext;
+    use zellij_utils::pane_size::Size;
+
+    #[derive(Debug, Clone)]
+    struct MockCliOsApi {
+        connect_err_kind: Option<io::ErrorKind>,
+    }
+
+    impl ClientOsApi for MockCliOsApi {
+        fn get_terminal_size(&self) -> Size {
+            Size { rows: 24, cols: 80 }
+        }
+        fn set_raw_mode(&mut self) {}
+        fn unset_raw_mode(&self) -> Result<(), io::Error> {
+            Ok(())
+        }
+        fn get_stdout_writer(&self) -> Box<dyn io::Write> {
+            Box::new(io::sink())
+        }
+        fn get_stdin_reader(&self) -> Box<dyn io::BufRead> {
+            Box::new(io::empty())
+        }
+        fn update_session_name(&mut self, _new_session_name: String) {}
+        fn read_from_stdin(&mut self) -> Result<Vec<u8>, &'static str> {
+            Ok(vec![])
+        }
+        fn box_clone(&self) -> Box<dyn ClientOsApi> {
+            Box::new(self.clone())
+        }
+        fn send_to_server(&self, _msg: ClientToServerMsg) {}
+        fn recv_from_server(&self) -> Option<(ServerToClientMsg, ErrorContext)> {
+            None
+        }
+        fn handle_signals(
+            &self,
+            _sigwinch_cb: Box<dyn Fn()>,
+            _quit_cb: Box<dyn Fn()>,
+            _resize_receiver: Option<std::sync::mpsc::Receiver<()>>,
+        ) {
+        }
+        fn connect_to_server(&self, _path: &std::path::Path) {}
+        fn connect_to_existing_server(&self, _path: &std::path::Path) -> Result<(), io::Error> {
+            match self.connect_err_kind {
+                Some(kind) => Err(io::Error::new(kind, "offline")),
+                None => Ok(()),
+            }
+        }
+        fn load_palette(&self) -> Palette {
+            Palette::default()
+        }
+        fn enable_mouse(&self) -> zellij_utils::errors::prelude::Result<()> {
+            Ok(())
+        }
+        fn disable_mouse(&self) -> zellij_utils::errors::prelude::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn start_cli_client_returns_error_when_server_unreachable() {
+        let os_api = Box::new(MockCliOsApi {
+            connect_err_kind: Some(io::ErrorKind::NotFound),
+        });
+        let code = start_cli_client(os_api, "nonexistent", vec![Action::NoOp]);
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn start_cli_client_returns_error_on_unexpected_server_disconnect() {
+        let os_api = Box::new(MockCliOsApi {
+            connect_err_kind: None,
+        });
+        let code = start_cli_client(os_api, "disconnecting", vec![Action::NoOp]);
+        assert_eq!(code, 1);
+    }
 }

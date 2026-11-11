@@ -398,6 +398,100 @@ fn find_indexed_session(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CliSessionTargetError {
+    NoActiveSession,
+    NotFoundSingleActive { requested: String, active: String },
+    NotFoundManyActive { requested: String },
+    UnspecifiedManyActive,
+}
+
+fn resolve_cli_session_target(
+    active_session: ActiveSession,
+    existing_sessions: &[String],
+    requested_session_name: Option<String>,
+    env_session_name: Option<String>,
+) -> Result<String, CliSessionTargetError> {
+    let target = requested_session_name
+        .filter(|s| !s.is_empty())
+        .or_else(|| env_session_name.filter(|s| !s.is_empty()));
+    match active_session {
+        ActiveSession::None => Err(CliSessionTargetError::NoActiveSession),
+        ActiveSession::One(session_name) => {
+            if let Some(requested) = target {
+                if requested != session_name {
+                    return Err(CliSessionTargetError::NotFoundSingleActive {
+                        requested,
+                        active: session_name,
+                    });
+                }
+            }
+            Ok(session_name)
+        },
+        ActiveSession::Many => match target {
+            Some(session_name) => {
+                if existing_sessions.contains(&session_name) {
+                    Ok(session_name)
+                } else {
+                    Err(CliSessionTargetError::NotFoundManyActive {
+                        requested: session_name,
+                    })
+                }
+            },
+            None => Err(CliSessionTargetError::UnspecifiedManyActive),
+        },
+    }
+}
+
+fn resolve_cli_session_or_exit(
+    requested_session_name: Option<String>,
+    unspecified_prompt: &str,
+) -> String {
+    let active_session = get_active_session();
+    let existing_sessions: Vec<String> = match &active_session {
+        ActiveSession::Many => get_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.0)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let env_session_name = envs::get_session_name().ok();
+    match resolve_cli_session_target(
+        active_session,
+        &existing_sessions,
+        requested_session_name,
+        env_session_name,
+    ) {
+        Ok(session_name) => session_name,
+        Err(CliSessionTargetError::NoActiveSession) => {
+            eprintln!("There is no active session!");
+            std::process::exit(1);
+        },
+        Err(CliSessionTargetError::NotFoundSingleActive { requested, active }) => {
+            eprintln!(
+                "Session '{}' not found. The following sessions are active:",
+                requested
+            );
+            eprintln!("{}", active);
+            std::process::exit(1);
+        },
+        Err(CliSessionTargetError::NotFoundManyActive { requested }) => {
+            eprintln!(
+                "Session '{}' not found. The following sessions are active:",
+                requested
+            );
+            list_sessions(false, false, true);
+            std::process::exit(1);
+        },
+        Err(CliSessionTargetError::UnspecifiedManyActive) => {
+            eprintln!("{}", unspecified_prompt);
+            list_sessions(false, false, true);
+            std::process::exit(1);
+        },
+    }
+}
+
 /// Client entrypoint for all [`zellij_utils::cli::CliAction`]
 ///
 /// Checks session to send the action to and attaches with client
@@ -406,100 +500,22 @@ pub(crate) fn send_action_to_session(
     requested_session_name: Option<String>,
     config: Option<Config>,
 ) {
-    match get_active_session() {
-        ActiveSession::None => {
-            eprintln!("There is no active session!");
-            std::process::exit(1);
-        },
-        ActiveSession::One(session_name) => {
-            if let Some(requested_session_name) = requested_session_name {
-                if requested_session_name != session_name {
-                    eprintln!(
-                        "Session '{}' not found. The following sessions are active:",
-                        requested_session_name
-                    );
-                    eprintln!("{}", session_name);
-                    std::process::exit(1);
-                }
-            }
-            attach_with_cli_client(cli_action, &session_name, config);
-        },
-        ActiveSession::Many => {
-            let existing_sessions: Vec<String> = get_sessions()
-                .unwrap_or_default()
-                .iter()
-                .map(|s| s.0.clone())
-                .collect();
-            if let Some(session_name) = requested_session_name {
-                if existing_sessions.contains(&session_name) {
-                    attach_with_cli_client(cli_action, &session_name, config);
-                } else {
-                    eprintln!(
-                        "Session '{}' not found. The following sessions are active:",
-                        session_name
-                    );
-                    list_sessions(false, false, true);
-                    std::process::exit(1);
-                }
-            } else if let Ok(session_name) = envs::get_session_name() {
-                attach_with_cli_client(cli_action, &session_name, config);
-            } else {
-                eprintln!("Please specify the session name to send actions to. The following sessions are active:");
-                list_sessions(false, false, true);
-                std::process::exit(1);
-            }
-        },
-    };
+    let session_name = resolve_cli_session_or_exit(
+        requested_session_name,
+        "Please specify the session name to send actions to. The following sessions are active:",
+    );
+    attach_with_cli_client(cli_action, &session_name, config);
 }
+
 pub(crate) fn subscribe_to_session(
     subscribe_cli: zellij_utils::cli::SubscribeCli,
     requested_session_name: Option<String>,
     _config: Option<Config>,
 ) {
-    let session_name = match get_active_session() {
-        ActiveSession::None => {
-            eprintln!("There is no active session!");
-            std::process::exit(1);
-        },
-        ActiveSession::One(session_name) => {
-            if let Some(ref requested) = requested_session_name {
-                if *requested != session_name {
-                    eprintln!(
-                        "Session '{}' not found. The following sessions are active:",
-                        requested
-                    );
-                    eprintln!("{}", session_name);
-                    std::process::exit(1);
-                }
-            }
-            session_name
-        },
-        ActiveSession::Many => {
-            let existing_sessions: Vec<String> = get_sessions()
-                .unwrap_or_default()
-                .iter()
-                .map(|s| s.0.clone())
-                .collect();
-            if let Some(session_name) = requested_session_name {
-                if existing_sessions.contains(&session_name) {
-                    session_name
-                } else {
-                    eprintln!(
-                        "Session '{}' not found. The following sessions are active:",
-                        session_name
-                    );
-                    list_sessions(false, false, true);
-                    std::process::exit(1);
-                }
-            } else if let Ok(session_name) = envs::get_session_name() {
-                session_name
-            } else {
-                eprintln!("Please specify the session name to subscribe to. The following sessions are active:");
-                list_sessions(false, false, true);
-                std::process::exit(1);
-            }
-        },
-    };
+    let session_name = resolve_cli_session_or_exit(
+        requested_session_name,
+        "Please specify the session name to subscribe to. The following sessions are active:",
+    );
     let os_input = get_os_input(zellij_client::os_input_output::get_cli_client_os_input);
     zellij_client::cli_client::start_subscribe_client(
         Box::new(os_input),
@@ -1062,4 +1078,62 @@ pub fn get_config_options_from_cli_args(opts: &CliArgs) -> Result<Options, Strin
     Setup::from_cli_args(&opts)
         .map(|(_, _, config_options, _, _)| config_options)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod cli_session_target_tests {
+    use super::*;
+
+    #[test]
+    fn stale_env_session_with_many_active_sessions_fails_instead_of_hanging() {
+        let active = vec!["persist".to_string(), "mobile".to_string()];
+        let res = resolve_cli_session_target(
+            ActiveSession::Many,
+            &active,
+            None,
+            Some("dead-session".to_string()),
+        );
+        assert_eq!(
+            res,
+            Err(CliSessionTargetError::NotFoundManyActive {
+                requested: "dead-session".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn stale_env_session_with_single_other_active_session_does_not_hijack_it() {
+        let res = resolve_cli_session_target(
+            ActiveSession::One("persist".to_string()),
+            &[],
+            None,
+            Some("dead-session".to_string()),
+        );
+        assert_eq!(
+            res,
+            Err(CliSessionTargetError::NotFoundSingleActive {
+                requested: "dead-session".to_string(),
+                active: "persist".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn single_active_session_without_env_or_flag_attaches_cleanly() {
+        let res =
+            resolve_cli_session_target(ActiveSession::One("persist".to_string()), &[], None, None);
+        assert_eq!(res, Ok("persist".to_string()));
+    }
+
+    #[test]
+    fn explicit_requested_session_overrides_stale_env_session() {
+        let active = vec!["persist".to_string(), "mobile".to_string()];
+        let res = resolve_cli_session_target(
+            ActiveSession::Many,
+            &active,
+            Some("persist".to_string()),
+            Some("dead-session".to_string()),
+        );
+        assert_eq!(res, Ok("persist".to_string()));
+    }
 }

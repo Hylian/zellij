@@ -145,6 +145,12 @@ pub trait ClientOsApi: Send + Sync + std::fmt::Debug {
     );
     /// Establish a connection with the server socket.
     fn connect_to_server(&self, path: &Path);
+    /// Connect to an already-running server socket with a bounded retry window,
+    /// returning an error instead of blocking forever if the session is offline.
+    fn connect_to_existing_server(&self, path: &Path) -> Result<(), io::Error> {
+        self.connect_to_server(path);
+        Ok(())
+    }
     fn spawn_server(&self, socket_path: &Path, debug: bool) -> Result<(), std::io::Error> {
         crate::spawn_server(socket_path, debug)
     }
@@ -311,6 +317,30 @@ impl ClientOsApi for ClientOsInputOutput {
         *self.send_instructions_to_server.lock().unwrap() = Some(sender);
         *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
     }
+    fn connect_to_existing_server(&self, path: &Path) -> Result<(), io::Error> {
+        const MAX_ATTEMPTS: usize = 5;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+        let mut last_err = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            match zellij_utils::consts::ipc_connect(path) {
+                Ok(socket) => {
+                    let (sender, receiver) = setup_ipc(socket, path);
+                    *self.send_instructions_to_server.lock().unwrap() = Some(sender);
+                    *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
+                    return Ok(());
+                },
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        std::thread::sleep(RETRY_DELAY);
+                    }
+                },
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "server socket unavailable")
+        }))
+    }
     fn load_palette(&self) -> Palette {
         // this was removed because termbg doesn't release stdin in certain scenarios (we know of
         // windows terminal and FreeBSD): https://github.com/zellij-org/zellij/issues/538
@@ -411,5 +441,17 @@ mod tests {
         let size = os_input.get_terminal_size();
         assert!(size.rows > 0, "rows should be positive");
         assert!(size.cols > 0, "cols should be positive");
+    }
+
+    #[test]
+    fn connect_to_existing_server_fails_fast_when_socket_missing() {
+        let os_input = get_cli_client_os_input().expect("should construct CLI ClientOsInputOutput");
+        let missing =
+            std::env::temp_dir().join(format!("zellij-missing-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        let err = os_input
+            .connect_to_existing_server(&missing)
+            .expect_err("missing socket should fail instead of looping forever");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }
