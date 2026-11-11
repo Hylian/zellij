@@ -20,6 +20,8 @@ struct ScriptedOsApi {
     inbox: Arc<Mutex<VecDeque<ServerToClientMsg>>>,
     sent_payloads: Arc<Mutex<Vec<Option<String>>>>,
     stdout: Arc<Mutex<Vec<u8>>>,
+    connect_error: Option<io::ErrorKind>,
+    disconnected: bool,
 }
 
 impl ScriptedOsApi {
@@ -89,6 +91,9 @@ impl ClientOsApi for ScriptedOsApi {
         }
     }
     fn recv_from_server(&self) -> Option<(ServerToClientMsg, ErrorContext)> {
+        if self.disconnected {
+            return None;
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if let Some(msg) = self.inbox.lock().unwrap().pop_front() {
@@ -109,6 +114,12 @@ impl ClientOsApi for ScriptedOsApi {
     }
     fn connect_to_server(&self, _path: &std::path::Path) -> std::io::Result<()> {
         Ok(())
+    }
+    fn connect_to_existing_server(&self, _path: &std::path::Path) -> std::io::Result<()> {
+        match self.connect_error {
+            Some(kind) => Err(io::Error::new(kind, "offline")),
+            None => Ok(()),
+        }
     }
     fn load_palette(&self) -> Palette {
         Palette::default()
@@ -627,4 +638,22 @@ fn queued_prompt_lines_are_sent_together_but_pipe_lines_are_not() {
         crate::cli_client::next_payload(&mut queued, false),
         Some(Some("a\n".to_owned()))
     );
+}
+
+#[test]
+fn start_cli_client_exits_nonzero_when_session_socket_cannot_be_connected() {
+    let os_api = ScriptedOsApi {
+        connect_error: Some(io::ErrorKind::NotFound),
+        ..Default::default()
+    };
+    assert_eq!(run(&os_api, Action::NoOp), 1);
+}
+
+#[test]
+fn an_action_exits_nonzero_when_the_server_disconnects() {
+    let os_api = ScriptedOsApi {
+        disconnected: true,
+        ..Default::default()
+    };
+    assert_eq!(run(&os_api, Action::NoOp), 1);
 }

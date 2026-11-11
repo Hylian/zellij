@@ -181,6 +181,11 @@ pub trait ClientOsApi: Send + Sync + std::fmt::Debug {
     /// Establish a connection with the server socket, waiting for the server to start listening.
     /// Fails only when the server refuses this client.
     fn connect_to_server(&self, path: &Path) -> std::io::Result<()>;
+    /// Connect to an already-running server socket with a bounded retry window,
+    /// returning an error instead of waiting indefinitely if the session is offline.
+    fn connect_to_existing_server(&self, path: &Path) -> std::io::Result<()> {
+        self.connect_to_server(path)
+    }
     fn spawn_server(&self, socket_path: &Path, debug: bool) -> Result<(), std::io::Error> {
         crate::spawn_server(socket_path, debug)
     }
@@ -346,7 +351,14 @@ impl ClientOsApi for ClientOsInputOutput {
         }
     }
     fn connect_to_server(&self, path: &Path) -> std::io::Result<()> {
-        let (sender, receiver) = connect_ipc(path)?;
+        let (sender, receiver) = connect_ipc(path, None)?;
+        *self.send_instructions_to_server.lock().unwrap() = Some(sender);
+        *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
+        Ok(())
+    }
+    fn connect_to_existing_server(&self, path: &Path) -> std::io::Result<()> {
+        const EXISTING_SERVER_CONNECT_ATTEMPTS: usize = 5;
+        let (sender, receiver) = connect_ipc(path, Some(EXISTING_SERVER_CONNECT_ATTEMPTS))?;
         *self.send_instructions_to_server.lock().unwrap() = Some(sender);
         *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
         Ok(())
@@ -489,5 +501,17 @@ mod tests {
         let size = os_input.get_terminal_size();
         assert!(size.rows > 0, "rows should be positive");
         assert!(size.cols > 0, "cols should be positive");
+    }
+
+    #[test]
+    fn connect_to_existing_server_fails_fast_when_socket_missing() {
+        let os_input = get_cli_client_os_input().expect("should construct CLI ClientOsInputOutput");
+        let missing =
+            std::env::temp_dir().join(format!("zellij-missing-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        let err = os_input
+            .connect_to_existing_server(&missing)
+            .expect_err("missing socket should fail instead of waiting forever");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }

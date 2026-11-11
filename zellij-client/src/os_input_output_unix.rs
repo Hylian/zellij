@@ -79,14 +79,23 @@ impl Iterator for BlockingSignalIterator {
 /// Connects to the server at `path`, waiting for it to start listening.
 pub(crate) fn connect_ipc(
     path: &Path,
+    max_attempts: Option<usize>,
 ) -> std::io::Result<(
     IpcSenderWithContext<zellij_utils::ipc::ClientToServerMsg>,
     IpcReceiverWithContext<zellij_utils::ipc::ServerToClientMsg>,
 )> {
+    let mut attempts = 0usize;
     let socket = loop {
         match zellij_utils::consts::ipc_connect(path) {
             Ok(socket) => break socket,
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Err(e),
+            Err(e) => {
+                attempts += 1;
+                if max_attempts.is_some_and(|limit| attempts >= limit) {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            },
         }
     };
     let sender = IpcSenderWithContext::new(socket);
